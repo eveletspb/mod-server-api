@@ -1,0 +1,41 @@
+#
+# Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license.
+#
+
+[worldserver]
+
+########################################
+# Server API
+########################################
+#
+# ServerApi.Enable
+#     Description: Enable the local HTTP API listener.
+#     Default: 0 - Disabled
+#              1 - Enabled
+#
+ServerApi.Enable = 0
+
+# ServerApi.BindAddress defaults to localhost. Non-local binds are refused
+# unless Bearer authentication is enabled with a non-empty API key.
+ServerApi.BindAddress = "127.0.0.1"
+
+# Requires restart after a change.
+ServerApi.Port = 7878
+
+# Maximum HTTP request size accepted by the MVP listener.
+ServerApi.MaxRequestBytes = 1048576
+ServerApi.MaxRequestsPerSecond = 1000
+ServerApi.PositionUpdates.IntervalMs = 1000
+ServerApi.CombatSnapshot.IntervalMs = 2000
+
+ServerApi.WebSocket.Enable = 1
+ServerApi.WebSocket.MaxFrameBytes = 1048576
+ServerApi.WebSocket.MaxSubscriptions = 100
+ServerApi.WebSocket.MaxQueue = 100
+ServerApi.WebSocket.MaxClients = 50
+
+# Set to 0 only for a trusted localhost deployment. This disables Bearer
+# authentication for REST and WebSocket endpoints.
+ServerApi.Auth.Enable = 1
+# Required when Auth.Enable = 1. Do not commit a production key.
+ServerApi.Auth.ApiKey = ""

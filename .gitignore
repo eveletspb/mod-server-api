@@ -1,0 +1,17 @@
+.agents/skills/mod-server-api-project/
+docs/project-context.md
+docs/project-layer-skill/
+
+# Generic files from the AzerothCore skeleton-module template.
+.directory
+.DS_Store
+*.orig
+*.rej
+*.*~
+*.bak
+*.patch
+*.diff
+*.swp
+tmp/
+.settings/
+.gradle
