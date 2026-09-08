@@ -5,8 +5,8 @@
 #ifndef SERVER_API_SERVER_H_
 #define SERVER_API_SERVER_H_
 
-#include "ServerApi/ServerApiConfig.h"
 #include "ServerApi/RequestRateLimiter.h"
+#include "ServerApi/ServerApiConfig.h"
 
 #include <atomic>
 #include <memory>

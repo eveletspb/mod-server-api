@@ -8,6 +8,9 @@
 # Server API
 ########################################
 #
+# Listener, authentication and request/WebSocket limit changes require a
+# worldserver restart. Sampling intervals support config reload.
+#
 # ServerApi.Enable
 #     Description: Enable the local HTTP API listener.
 #     Default: 0 - Disabled

@@ -70,7 +70,8 @@ namespace
         std::condition_variable condition;
         uint32_t deliveries = 0;
 
-        ServerApi::SubscriptionId const subscription = bus.Subscribe("test.*", [&mutex, &condition, &deliveries](ServerApi::ApiEvent const&)
+        ServerApi::SubscriptionId const subscription = bus.Subscribe("test.*",
+            [&mutex, &condition, &deliveries](ServerApi::ApiEvent const&)
         {
             std::lock_guard lock(mutex);
             ++deliveries;
@@ -95,7 +96,7 @@ namespace
         EXPECT_EQ(deliveries, 1);
     }
 
-    TEST(ServerApiEventBus, HandlerFailureDoesNotStopDispatcher)
+    TEST(ServerApiEventBus, HandlerFailuresDoNotStopDispatcher)
     {
         ServerApi::EventBus bus;
         std::mutex mutex;
@@ -106,6 +107,8 @@ namespace
         {
             if (event.type == "test.failure")
                 throw std::runtime_error("expected test failure");
+            if (event.type == "test.unknown-failure")
+                throw 1;
 
             std::lock_guard lock(mutex);
             ++deliveries;
@@ -114,6 +117,7 @@ namespace
 
         bus.Start();
         ASSERT_TRUE(bus.Publish({"test.failure"}));
+        ASSERT_TRUE(bus.Publish({"test.unknown-failure"}));
         ASSERT_TRUE(bus.Publish({"test.success"}));
 
         std::unique_lock lock(mutex);
@@ -136,7 +140,8 @@ namespace
         bool releaseFirst = false;
         std::vector<std::string> received;
 
-        bus.Subscribe("test.*", [&mutex, &condition, &firstStarted, &releaseFirst, &received](ServerApi::ApiEvent const& event)
+        bus.Subscribe("test.*", [&mutex, &condition, &firstStarted, &releaseFirst,
+            &received](ServerApi::ApiEvent const& event)
         {
             std::unique_lock lock(mutex);
             received.push_back(event.type);
@@ -174,6 +179,6 @@ namespace
         ASSERT_EQ(received.size(), 2);
         EXPECT_EQ(received[0], "test.first");
         EXPECT_EQ(received[1], "test.normal");
-        EXPECT_EQ(bus.DroppedCount(), 0);
+        EXPECT_EQ(bus.DroppedCount(), 1);
     }
 }

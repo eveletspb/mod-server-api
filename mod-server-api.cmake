@@ -4,6 +4,7 @@ if (BUILD_TESTING)
 
         add_executable(server_api_tests
             "${MOD_PATH}/tests/TestEventBus.cpp"
+            "${MOD_PATH}/tests/TestHttpUtils.cpp"
             "${MOD_PATH}/tests/TestRequestRateLimiter.cpp"
         )
 

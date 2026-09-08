@@ -1,6 +1,8 @@
 # Сборка `mod-server-api`
 
-Сборку запускайте из корня AzerothCore, не из каталога модуля. Модуль подключается корневым `modules/CMakeLists.txt`; отдельный `CMakeLists.txt` внутри модуля не требуется.
+Сборку запускайте из корня AzerothCore, не из каталога модуля. Модуль
+подключается корневым `modules/CMakeLists.txt`; отдельный `CMakeLists.txt`
+внутри модуля не требуется.
 
 ```bash
 cd /Users/sergeybolshanin/Documents/acore/azerothcore-wotlk
@@ -14,7 +16,11 @@ cmake --build build --target worldserver --parallel
 cmake --install build
 ```
 
-Повторный `cmake -S . -B build` обязателен после добавления нового модуля или новых `.conf.dist`: AzerothCore обнаруживает modules и формирует `ModulesLoader.cpp` на этапе конфигурации. `cmake --install build` устанавливает module config в каталог конфигурации выбранного `CMAKE_INSTALL_PREFIX`.
+Повторный `cmake -S . -B build` обязателен после добавления нового модуля или
+новых `.conf.dist`: AzerothCore обнаруживает modules и формирует
+`ModulesLoader.cpp` на этапе конфигурации. `cmake --install build`
+устанавливает module config в каталог конфигурации выбранного
+`CMAKE_INSTALL_PREFIX`.
 
 После конфигурации проверьте, что в выводе CMake модуль `mod-server-api` не отключён. Для первого запуска API оставьте:
 

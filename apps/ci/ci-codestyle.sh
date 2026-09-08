@@ -1,40 +1,42 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "Codestyle check script:"
 echo
 
-declare -A singleLineRegexChecks=(
-    ["LOG_.+GetCounter"]="Use ObjectGuid::ToString().c_str() method instead of ObjectGuid::GetCounter() when logging. Check the lines above"
-    ["[[:blank:]]$"]="Remove whitespace at the end of the lines above"
-    ["\t"]="Replace tabs with 4 spaces in the lines above"
-)
+if ! command -v rg >/dev/null 2>&1; then
+  echo "ripgrep (rg) is required" >&2
+  exit 2
+fi
 
-for check in ${!singleLineRegexChecks[@]}; do
-    echo "  Checking RegEx: '${check}'"
+check_pattern() {
+  local mode="$1"
+  local pattern="$2"
+  local message="$3"
+  local options=(-n)
 
-    if grep -P -r -I -n ${check} src; then
-        echo
-        echo "${singleLineRegexChecks[$check]}"
-        exit 1
-    fi
-done
+  if [[ "$mode" == "multiline" ]]; then
+    options+=(-U)
+  fi
 
-declare -A multiLineRegexChecks=(
-    ["LOG_[^;]+GetCounter"]="Use ObjectGuid::ToString().c_str() method instead of ObjectGuid::GetCounter() when logging. Check the lines above"
-    ["\n\n\n"]="Multiple blank lines detected, keep only one. Check the files above"
-)
+  echo "  Checking RegEx: '${pattern}'"
+  if rg "${options[@]}" -- "$pattern" src; then
+    echo
+    echo "$message"
+    exit 1
+  fi
+}
 
-for check in ${!multiLineRegexChecks[@]}; do
-    echo "  Checking RegEx: '${check}'"
-
-    if grep -Pzo -r -I ${check} src; then
-        echo
-        echo
-        echo "${multiLineRegexChecks[$check]}"
-        exit 1
-    fi
-done
+check_pattern single 'LOG_.+GetCounter' \
+  'Use ObjectGuid::ToString().c_str() instead of ObjectGuid::GetCounter() when logging. Check the lines above'
+check_pattern single '[[:blank:]]$' \
+  'Remove whitespace at the end of the lines above'
+check_pattern single '\t' \
+  'Replace tabs with 4 spaces in the lines above'
+check_pattern multiline 'LOG_[^;]+GetCounter' \
+  'Use ObjectGuid::ToString().c_str() instead of ObjectGuid::GetCounter() when logging. Check the lines above'
+check_pattern multiline '\n\n\n' \
+  'Multiple blank lines detected, keep only one. Check the lines above'
 
 echo
 echo "Everything looks good"

@@ -64,27 +64,27 @@ curl -i "${BASE_URL}/api/v1/accounts/1/characters"
 echo "===== 18. Invalid player limit; expected 400 ====="
 curl -i "${BASE_URL}/api/v1/players?limit=0"
 
-echo "===== 17. Invalid group ID; expected 400 ====="
+echo "===== 18. Invalid group ID; expected 400 ====="
 curl -i "${BASE_URL}/api/v1/groups/not-a-number"
 
-echo "===== 18. Missing instance; expected 404 ====="
+echo "===== 19. Missing instance; expected 404 ====="
 curl -i "${BASE_URL}/api/v1/instances/999999999"
 
-echo "===== 19. Invalid dungeon-clear start; safe, no state change, expected 400 ====="
+echo "===== 20. Invalid dungeon-clear start; safe, no state change, expected 400 ====="
 curl -i -X POST "${BASE_URL}/api/v1/dungeon-clear/runs/start"
 
-echo "===== 20. Invalid kick command; safe, no state change, expected 400 ====="
+echo "===== 21. Invalid kick command; safe, no state change, expected 400 ====="
 curl -i -X POST "${BASE_URL}/api/v1/players/not-a-guid/kick"
 
-echo "===== 21. Invalid teleport command; safe, no state change, expected 400 ====="
+echo "===== 22. Invalid teleport command; safe, no state change, expected 400 ====="
 curl -i -X POST \
   "${BASE_URL}/api/v1/players/1/teleport?mapId=bad&x=0&y=0&z=0&orientation=0"
 
 if [[ -n "${API_KEY}" ]]; then
-    echo "===== 22. Authenticated server request ====="
+    echo "===== 23. Authenticated server request ====="
     curl -i -H "${AUTH_HEADER}" "${BASE_URL}/api/v1/server"
 
-    echo "===== 23. Authenticated WebSocket upgrade request ====="
+    echo "===== 24. Authenticated WebSocket upgrade request ====="
     curl -i --http1.1 --max-time 3 \
       -H "Connection: Upgrade" \
       -H "Upgrade: websocket" \
@@ -93,7 +93,7 @@ if [[ -n "${API_KEY}" ]]; then
       -H "${AUTH_HEADER}" \
       "${BASE_URL}/ws/v1/events"
 else
-    echo "===== 19. Authenticated checks skipped ====="
+    echo "===== 23-24. Authenticated checks skipped ====="
     echo "Set SERVER_API_KEY when ServerApi.Auth.Enable = 1."
 fi
 

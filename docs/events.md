@@ -59,4 +59,6 @@ rejects new connections after `ServerApi.WebSocket.MaxClients` is reached.
 
 Telemetry events have lower priority under EventBus backpressure and may be
 dropped when the bounded queue is full. Lifecycle and control events keep the
-normal/critical delivery path whenever capacity is available.
+normal/critical delivery path whenever capacity is available. The
+`droppedEvents` metric includes telemetry rejected at capacity and telemetry
+evicted to make room for a higher-priority event.

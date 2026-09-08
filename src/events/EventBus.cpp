@@ -6,10 +6,10 @@
 
 #include "Log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
-#include <algorithm>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -84,6 +84,7 @@ namespace ServerApi
                 return false;
             }
             _queue.erase(telemetry);
+            ++_droppedCount;
         }
 
         if (event.timestampMilliseconds == 0)
@@ -105,7 +106,8 @@ namespace ServerApi
     void EventBus::Unsubscribe(SubscriptionId subscriptionId)
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        _subscriptions.erase(std::remove_if(_subscriptions.begin(), _subscriptions.end(), [subscriptionId](Subscription const& subscription)
+        _subscriptions.erase(std::remove_if(_subscriptions.begin(), _subscriptions.end(),
+            [subscriptionId](Subscription const& subscription)
         {
             return subscription.id == subscriptionId;
         }), _subscriptions.end());
@@ -159,6 +161,10 @@ namespace ServerApi
                 catch (std::exception const& exception)
                 {
                     LOG_ERROR("server-api.events", "Event handler failed for {}: {}", event.type, exception.what());
+                }
+                catch (...)
+                {
+                    LOG_ERROR("server-api.events", "Event handler failed for {} with an unknown exception", event.type);
                 }
             }
         }

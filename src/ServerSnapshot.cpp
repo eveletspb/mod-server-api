@@ -4,11 +4,11 @@
 
 #include "ServerApi/ServerSnapshot.h"
 
-#include "Configuration/Config.h"
 #include "GameTime.h"
 #include "Group.h"
 #include "MapMgr.h"
 #include "Player.h"
+#include "Realm.h"
 #include "WorldSessionMgr.h"
 
 #include <mutex>
@@ -52,7 +52,7 @@ namespace ServerApi
     void RefreshServerSnapshot()
     {
         ServerSnapshot updated;
-        updated.realmId = sConfigMgr->GetOption<uint32_t>("RealmID", 0);
+        updated.realmId = realm.Id.Realm;
         updated.serverTime = static_cast<uint64_t>(GameTime::GetGameTime().count());
         updated.uptimeSeconds = static_cast<uint64_t>(GameTime::GetUptime().count());
         updated.playersOnline = sWorldSessionMgr->GetPlayerCount();
@@ -72,46 +72,50 @@ namespace ServerApi
         std::vector<GroupSnapshot> updatedGroups;
         std::unordered_set<uint64_t> groupIds;
         updatedPlayers.reserve(updated.playersOnline);
-        sWorldSessionMgr->DoForAllOnlinePlayers([&updated, &updatedPlayers](Player* player)
+        sWorldSessionMgr->DoForAllOnlinePlayers([&updated, &updatedPlayers, &updatedGroups, &groupIds](Player* player)
         {
-            PlayerSnapshot snapshot;
-            snapshot.guid = player->GetGUID().GetCounter();
-            snapshot.name = player->GetName();
-            snapshot.level = player->GetLevel();
-            snapshot.playerClass = player->getClass();
-            snapshot.race = player->getRace();
-            snapshot.mapId = player->GetMapId();
-            snapshot.zoneId = player->GetZoneId();
-            snapshot.health = player->GetHealth();
-            snapshot.maxHealth = player->GetMaxHealth();
-            snapshot.power = player->GetPower(POWER_MANA);
-            snapshot.maxPower = player->GetMaxPower(POWER_MANA);
-            snapshot.bot = player->GetSession() && player->GetSession()->IsBot();
-            if (snapshot.bot)
+            PlayerSnapshot playerSnapshot;
+            playerSnapshot.guid = player->GetGUID().GetCounter();
+            playerSnapshot.name = player->GetName();
+            playerSnapshot.level = player->GetLevel();
+            playerSnapshot.playerClass = player->getClass();
+            playerSnapshot.race = player->getRace();
+            playerSnapshot.mapId = player->GetMapId();
+            playerSnapshot.zoneId = player->GetZoneId();
+            playerSnapshot.health = player->GetHealth();
+            playerSnapshot.maxHealth = player->GetMaxHealth();
+            Powers const powerType = player->getPowerType();
+            playerSnapshot.power = player->GetPower(powerType);
+            playerSnapshot.maxPower = player->GetMaxPower(powerType);
+            if (WorldSession* session = player->GetSession())
+            {
+                playerSnapshot.accountId = session->GetAccountId();
+                playerSnapshot.remoteAddress = session->GetRemoteAddress();
+                playerSnapshot.latency = session->GetLatency();
+                playerSnapshot.bot = session->IsBot();
+            }
+            if (playerSnapshot.bot)
                 ++updated.botsOnline;
-            snapshot.inCombat = player->IsInCombat();
+            playerSnapshot.inCombat = player->IsInCombat();
             if (Unit* victim = player->GetVictim())
-                snapshot.victimGuid = victim->GetGUID().GetCounter();
-            snapshot.x = player->GetPositionX();
-            snapshot.y = player->GetPositionY();
-            snapshot.z = player->GetPositionZ();
-            snapshot.orientation = player->GetOrientation();
-            updatedPlayers.push_back(std::move(snapshot));
-        });
+                playerSnapshot.victimGuid = victim->GetGUID().GetCounter();
+            playerSnapshot.x = player->GetPositionX();
+            playerSnapshot.y = player->GetPositionY();
+            playerSnapshot.z = player->GetPositionZ();
+            playerSnapshot.orientation = player->GetOrientation();
+            updatedPlayers.push_back(std::move(playerSnapshot));
 
-        sWorldSessionMgr->DoForAllOnlinePlayers([&updatedGroups, &groupIds](Player* player)
-        {
             Group* group = player->GetGroup();
             if (!group || !groupIds.insert(group->GetGUID().GetCounter()).second)
                 return;
 
-            GroupSnapshot snapshot;
-            snapshot.id = group->GetGUID().GetCounter();
-            snapshot.leaderGuid = group->GetLeaderGUID().GetCounter();
-            snapshot.raid = group->isRaidGroup();
+            GroupSnapshot groupSnapshot;
+            groupSnapshot.id = group->GetGUID().GetCounter();
+            groupSnapshot.leaderGuid = group->GetLeaderGUID().GetCounter();
+            groupSnapshot.raid = group->isRaidGroup();
             for (Group::MemberSlot const& member : group->GetMemberSlots())
-                snapshot.memberGuids.push_back(member.guid.GetCounter());
-            updatedGroups.push_back(std::move(snapshot));
+                groupSnapshot.memberGuids.push_back(member.guid.GetCounter());
+            updatedGroups.push_back(std::move(groupSnapshot));
         });
 
         std::vector<InstanceSnapshot> updatedInstances;

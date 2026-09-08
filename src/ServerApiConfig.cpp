@@ -20,11 +20,13 @@ namespace ServerApi
         config.authEnabled = sConfigMgr->GetOption<bool>("ServerApi.Auth.Enable", true);
         config.apiKey = sConfigMgr->GetOption<std::string>("ServerApi.Auth.ApiKey", "");
         config.webSocketEnabled = sConfigMgr->GetOption<bool>("ServerApi.WebSocket.Enable", true);
-        config.maxWebSocketFrameBytes = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxFrameBytes", 1024 * 1024);
+        config.maxWebSocketFrameBytes =
+            sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxFrameBytes", 1024 * 1024);
         config.maxWebSocketSubscriptions = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxSubscriptions", 100);
         config.maxWebSocketQueue = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxQueue", 100);
         config.maxWebSocketClients = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxClients", 50);
-        config.positionUpdatesIntervalMs = sConfigMgr->GetOption<uint32_t>("ServerApi.PositionUpdates.IntervalMs", 1000);
+        config.positionUpdatesIntervalMs =
+            sConfigMgr->GetOption<uint32_t>("ServerApi.PositionUpdates.IntervalMs", 1000);
         config.combatSnapshotIntervalMs = sConfigMgr->GetOption<uint32_t>("ServerApi.CombatSnapshot.IntervalMs", 2000);
 
         if (config.positionUpdatesIntervalMs == 0)
@@ -45,9 +47,12 @@ namespace ServerApi
             config.enabled = false;
         }
 
-        if (config.maxWebSocketFrameBytes == 0 || config.maxWebSocketSubscriptions == 0 || config.maxWebSocketQueue == 0 || config.maxWebSocketClients == 0)
+        if (config.webSocketEnabled && (config.maxWebSocketFrameBytes == 0 ||
+            config.maxWebSocketSubscriptions == 0 || config.maxWebSocketQueue == 0 ||
+            config.maxWebSocketClients == 0))
         {
-            LOG_ERROR("server-api.config", "WebSocket frame, subscription, queue and client limits must be greater than zero");
+            LOG_ERROR("server-api.config",
+                "WebSocket frame, subscription, queue and client limits must be greater than zero");
             config.enabled = false;
         }
 

@@ -1,11 +1,29 @@
 # AzerothCore hooks used by `mod-server-api`
 
-| Hook | Class | File | Purpose | Thread/lifetime notes |
-|---|---|---|---|---|
-| `WORLDHOOK_ON_BEFORE_CONFIG_LOAD` | `ServerApiWorldScript` | `src/ServerApiModule.cpp` | Reads and validates `ServerApi.*` settings before startup | Runs on the world lifecycle; only copies scalar/string config |
-| `WORLDHOOK_ON_STARTUP` | `ServerApiWorldScript` | `src/ServerApiModule.cpp` | Starts EventBus and API IO thread when enabled | Does not access gameplay objects |
-| `WORLDHOOK_ON_SHUTDOWN` | `ServerApiWorldScript` | `src/ServerApiModule.cpp` | Stops listener and joins API/EventBus workers | Must complete before module-owned worker state is destroyed |
+All hooks are implemented in `src/ServerApiModule.cpp`.
 
-No player, group, map, combat, death or instance hooks are registered yet. Future hooks must enqueue immutable values or build snapshots on the world thread; raw `Player*`, `Map*`, `Group*` and similar pointers must not be passed to API workers.
+## `ServerApiWorldScript`
 
-The module loader is `Addmod_server_apiScripts()` in `src/server_api_loader.cpp`; it delegates registration to `AddServerApiScripts()`.
+- `WORLDHOOK_ON_BEFORE_CONFIG_LOAD` reads and validates `ServerApi.*` settings.
+- `WORLDHOOK_ON_STARTUP` starts EventBus and the API IO thread when enabled.
+- `WORLDHOOK_ON_UPDATE` drains commands and refreshes snapshots and events on
+  the world thread.
+- `WORLDHOOK_ON_SHUTDOWN` stops the listener and joins module-owned workers.
+
+## `ServerApiPlayerScript`
+
+- `PLAYERHOOK_ON_LOGIN` publishes `player.login`.
+- `PLAYERHOOK_ON_LOGOUT` publishes `player.logout` before player teardown.
+- `PLAYERHOOK_ON_PLAYER_JUST_DIED` publishes `player.death`.
+
+Player hooks copy event fields during the call and never pass `Player*` to an
+API worker.
+
+Group, map, combat and instance changes are derived from periodic world-thread
+snapshots rather than separate hooks. Hooks must publish immutable values;
+raw `Player*`, `Map*`, `Group*` and similar pointers must not be passed to API
+workers.
+
+The module loader is `Addmod_server_apiScripts()` in
+`src/server_api_loader.cpp`; it delegates registration to
+`AddServerApiScripts()`.

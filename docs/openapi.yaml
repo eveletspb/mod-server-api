@@ -218,7 +218,11 @@ paths:
         - {name: password, in: query, required: true, schema: {type: string, format: password}}
         - {name: email, in: query, required: false, schema: {type: string, format: email}}
       responses:
-        '202': {description: Queued, content: {application/json: {schema: {$ref: '#/components/schemas/QueuedCommand'}}}}
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QueuedCommand'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/QueueFull'}
@@ -481,8 +485,9 @@ components:
         players: {type: integer, format: int32}
     QueuedCommand:
       type: object
-      required: [status, operation, guid]
+      required: [status, operation]
       properties:
         status: {type: string, enum: [queued]}
         operation: {type: string}
         guid: {type: integer, format: int64}
+        accountId: {type: integer, format: int32}

@@ -5,30 +5,31 @@
 #include "ServerApi/ApiServer.h"
 #include "ServerApi/CommandQueue.h"
 #include "ServerApi/EventBus.h"
-#include "ServerApi/EventBus.h"
+#include "ServerApi/HttpUtils.h"
 #include "ServerApi/ServerSnapshot.h"
 
-#include "Log.h"
 #include "AccountMgr.h"
 #include "BanMgr.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
+#include "Log.h"
 #include "Player.h"
 #include "Realm.h"
+#include "SharedDefines.h"
 #include "StringFormat.h"
-#include "World.h"
-#include "WorldSessionMgr.h"
 #include "Util.h"
+#include "WorldSessionMgr.h"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <sstream>
-#include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #ifdef MOD_DUNGEON_CLEAR
@@ -46,10 +47,12 @@ namespace ServerApi
 {
     namespace
     {
-        std::string BuildResponse(uint16_t status, std::string_view reason, std::string_view body, std::string_view headers = {})
+        std::string BuildResponse(uint16_t status, std::string_view reason, std::string_view body,
+            std::string_view headers = {})
         {
             return Acore::StringFormat(
-                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n"
+                "Connection: close\r\n{}\r\n{}",
                 status, reason, body.size(), headers, body);
         }
 
@@ -61,35 +64,23 @@ namespace ServerApi
             if (config.apiKey.empty())
                 return false;
 
-            std::size_t lineStart = request.find("\r\n");
-            if (lineStart == std::string::npos)
+            static constexpr std::string_view BearerPrefix = "Bearer ";
+            std::string const authorization = HeaderValue(request, "authorization");
+            if (!authorization.starts_with(BearerPrefix))
                 return false;
 
-            while (lineStart != std::string::npos)
+            std::string_view const token(authorization.data() + BearerPrefix.size(),
+                authorization.size() - BearerPrefix.size());
+            if (token.size() != config.apiKey.size())
+                return false;
+
+            unsigned char difference = 0;
+            for (std::size_t index = 0; index < token.size(); ++index)
             {
-                lineStart += 2;
-                std::size_t lineEnd = request.find("\r\n", lineStart);
-                if (lineEnd == std::string::npos || lineEnd == lineStart)
-                    break;
-
-                std::size_t colon = request.find(':', lineStart);
-                if (colon != std::string::npos && colon < lineEnd)
-                {
-                    std::string name = request.substr(lineStart, colon - lineStart);
-                    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (name == "authorization")
-                    {
-                        std::string value = request.substr(colon + 1, lineEnd - colon - 1);
-                        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-                            value.erase(value.begin());
-                        return value == "Bearer " + config.apiKey;
-                    }
-                }
-
-                lineStart = lineEnd;
+                difference |= static_cast<unsigned char>(token[index]) ^
+                    static_cast<unsigned char>(config.apiKey[index]);
             }
-
-            return false;
+            return difference == 0;
         }
 
         std::string BuildServerResponse()
@@ -105,70 +96,10 @@ namespace ServerApi
         {
             ServerSnapshot const snapshot = GetServerSnapshot();
             return Acore::StringFormat(
-                R"({{"activeMaps":{},"activeInstances":{},"playersOnline":{},"botsOnline":{},"eventQueue":{},"commandQueue":{},"droppedEvents":{}}})",
+                R"({{"activeMaps":{},"activeInstances":{},"playersOnline":{},"botsOnline":{},)"
+                R"("eventQueue":{},"commandQueue":{},"droppedEvents":{}}})",
                 snapshot.activeMaps, snapshot.activeInstances, snapshot.playersOnline, snapshot.botsOnline,
                 GetEventBus().QueueSize(), GetCommandQueue().Size(), GetEventBus().DroppedCount());
-        }
-
-        std::string PathFromTarget(std::string const& target)
-        {
-            std::size_t const queryStart = target.find('?');
-            return target.substr(0, queryStart);
-        }
-
-        std::string QueryValue(std::string const& target, std::string_view key)
-        {
-            std::size_t const queryStart = target.find('?');
-            if (queryStart == std::string::npos)
-                return {};
-
-            std::string const query = target.substr(queryStart + 1);
-            std::string const prefix = std::string(key) + "=";
-            std::size_t start = 0;
-            while (start < query.size())
-            {
-                std::size_t end = query.find('&', start);
-                if (end == std::string::npos)
-                    end = query.size();
-                if (query.compare(start, prefix.size(), prefix) == 0)
-                    return query.substr(start + prefix.size(), end - start - prefix.size());
-                start = end + 1;
-            }
-
-            return {};
-        }
-
-        std::string EscapeJson(std::string const& value)
-        {
-            std::string escaped;
-            escaped.reserve(value.size());
-            for (char character : value)
-            {
-                if (character == '\\' || character == '"')
-                    escaped.push_back('\\');
-                escaped.push_back(character);
-            }
-            return escaped;
-        }
-
-        bool ParseUnsigned(std::string const& value, uint32_t& result)
-        {
-            if (value.empty())
-                return false;
-
-            try
-            {
-                std::size_t parsed = 0;
-                unsigned long const number = std::stoul(value, &parsed);
-                if (parsed != value.size() || number > UINT32_MAX)
-                    return false;
-                result = static_cast<uint32_t>(number);
-                return true;
-            }
-            catch (std::exception const&)
-            {
-                return false;
-            }
         }
 
         std::string BuildAccountJson(uint32_t accountId)
@@ -199,10 +130,15 @@ namespace ServerApi
             std::string const lockCountry = fields[16].Get<std::string>();
             std::string currentIp;
             uint32 latency = 0;
-            if (WorldSession* session = sWorldSessionMgr->FindSession(accountId))
+            std::vector<PlayerSnapshot> const players = GetPlayerSnapshots();
+            auto const player = std::find_if(players.begin(), players.end(), [accountId](PlayerSnapshot const& item)
             {
-                currentIp = session->GetRemoteAddress();
-                latency = session->GetLatency();
+                return item.accountId == accountId;
+            });
+            if (player != players.end())
+            {
+                currentIp = player->remoteAddress;
+                latency = player->latency;
             }
 
             LoginDatabasePreparedStatement* banStatement =
@@ -215,12 +151,15 @@ namespace ServerApi
             {
                 Field* banFields = banResult->Fetch();
                 banned = true;
-                banUntil = banFields[1].Get<uint64>() == banFields[0].Get<uint64>()
-                    ? 0 : banFields[0].Get<uint64>();
+                bool const permanent = banFields[1].Get<bool>();
+                banUntil = permanent ? 0 : banFields[0].Get<uint64>();
             }
 
             return Acore::StringFormat(
-                R"({{"id":{},"username":"{}","security":{},"email":"{}","lastIp":"{}","currentIp":"{}","lastLogin":"{}","joinedAt":"{}","locked":{},"banned":{},"banUntil":{},"muteUntil":{},"muteReason":"{}","muteBy":"{}","lockCountry":"{}","failedLogins":{},"expansion":{},"flags":{},"totalTime":{},"latency":{},"characters":{}}})",
+                R"({{"id":{},"username":"{}","security":{},"email":"{}","lastIp":"{}",)"
+                R"("currentIp":"{}","lastLogin":"{}","joinedAt":"{}","locked":{},"banned":{},)"
+                R"("banUntil":{},"muteUntil":{},"muteReason":"{}","muteBy":"{}","lockCountry":"{}",)"
+                R"("failedLogins":{},"expansion":{},"flags":{},"totalTime":{},"latency":{},"characters":{}}})",
                 accountId, EscapeJson(username), security, EscapeJson(email), EscapeJson(lastIp),
                 EscapeJson(currentIp), EscapeJson(lastLogin), EscapeJson(joinedAt), locked != 0,
                 banned, banUntil, muteTime, EscapeJson(muteReason), EscapeJson(muteBy),
@@ -267,14 +206,185 @@ namespace ServerApi
         {
             switch (result)
             {
-                case AOR_OK: return "ok";
-                case AOR_NAME_TOO_LONG: return "name_too_long";
-                case AOR_PASS_TOO_LONG: return "password_too_long";
-                case AOR_EMAIL_TOO_LONG: return "email_too_long";
-                case AOR_NAME_ALREADY_EXIST: return "name_already_exists";
-                case AOR_NAME_NOT_EXIST: return "account_not_found";
-                default: return "database_error";
+                case AOR_OK:
+                    return "ok";
+                case AOR_NAME_TOO_LONG:
+                    return "name_too_long";
+                case AOR_PASS_TOO_LONG:
+                    return "password_too_long";
+                case AOR_EMAIL_TOO_LONG:
+                    return "email_too_long";
+                case AOR_NAME_ALREADY_EXIST:
+                    return "name_already_exists";
+                case AOR_NAME_NOT_EXIST:
+                    return "account_not_found";
+                default:
+                    return "database_error";
             }
+        }
+
+        enum class AccountAction
+        {
+            Password,
+            Email,
+            Username,
+            Lock,
+            Expansion,
+            Flags,
+            Ban,
+            Unban,
+            Mute,
+            Unmute,
+            Delete
+        };
+
+        struct AccountCommand
+        {
+            uint32 accountId = 0;
+            AccountAction action = AccountAction::Password;
+            uint32 value = 0;
+            std::string password;
+            std::string email;
+            std::string username;
+            std::string duration;
+            std::string reason;
+        };
+
+        bool ParseAccountAction(std::string_view value, AccountAction& action)
+        {
+            static constexpr std::array Actions = {
+                std::pair{"password", AccountAction::Password},
+                std::pair{"email", AccountAction::Email},
+                std::pair{"username", AccountAction::Username},
+                std::pair{"lock", AccountAction::Lock},
+                std::pair{"expansion", AccountAction::Expansion},
+                std::pair{"flags", AccountAction::Flags},
+                std::pair{"ban", AccountAction::Ban},
+                std::pair{"unban", AccountAction::Unban},
+                std::pair{"mute", AccountAction::Mute},
+                std::pair{"unmute", AccountAction::Unmute},
+                std::pair{"delete", AccountAction::Delete}
+            };
+
+            auto const entry = std::find_if(Actions.begin(), Actions.end(), [value](auto const& item)
+            {
+                return item.first == value;
+            });
+            if (entry == Actions.end())
+                return false;
+
+            action = entry->second;
+            return true;
+        }
+
+        std::string_view AccountActionName(AccountAction action)
+        {
+            switch (action)
+            {
+                case AccountAction::Password:
+                    return "password";
+                case AccountAction::Email:
+                    return "email";
+                case AccountAction::Username:
+                    return "username";
+                case AccountAction::Lock:
+                    return "lock";
+                case AccountAction::Expansion:
+                    return "expansion";
+                case AccountAction::Flags:
+                    return "flags";
+                case AccountAction::Ban:
+                    return "ban";
+                case AccountAction::Unban:
+                    return "unban";
+                case AccountAction::Mute:
+                    return "mute";
+                case AccountAction::Unmute:
+                    return "unmute";
+                case AccountAction::Delete:
+                    return "delete";
+            }
+            return "unknown";
+        }
+
+        void ExecuteAccountCommand(AccountCommand const& command)
+        {
+            AccountOpResult accountResult = AOR_OK;
+            switch (command.action)
+            {
+                case AccountAction::Password:
+                    accountResult = AccountMgr::ChangePassword(command.accountId, command.password);
+                    break;
+                case AccountAction::Email:
+                    accountResult = AccountMgr::ChangeEmail(command.accountId, command.email);
+                    break;
+                case AccountAction::Username:
+                    accountResult = AccountMgr::ChangeUsername(command.accountId, command.username, command.password);
+                    break;
+                case AccountAction::Lock:
+                {
+                    LoginDatabasePreparedStatement* statement =
+                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_ACCOUNT_LOCK);
+                    statement->SetData(0, command.value != 0);
+                    statement->SetData(1, command.accountId);
+                    LoginDatabase.Execute(statement);
+                    break;
+                }
+                case AccountAction::Expansion:
+                {
+                    LoginDatabasePreparedStatement* statement =
+                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_EXPANSION);
+                    statement->SetData(0, command.value);
+                    statement->SetData(1, command.accountId);
+                    LoginDatabase.Execute(statement);
+                    break;
+                }
+                case AccountAction::Flags:
+                {
+                    LoginDatabasePreparedStatement* statement =
+                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_SET_ACCOUNT_FLAG);
+                    statement->SetData(0, command.value);
+                    statement->SetData(1, command.accountId);
+                    LoginDatabase.Execute(statement);
+                    break;
+                }
+                case AccountAction::Ban:
+                {
+                    std::string accountName;
+                    AccountMgr::GetName(command.accountId, accountName);
+                    sBan->BanAccount(accountName, command.duration,
+                        command.reason.empty() ? "server-api" : command.reason, "server-api");
+                    break;
+                }
+                case AccountAction::Unban:
+                {
+                    std::string accountName;
+                    AccountMgr::GetName(command.accountId, accountName);
+                    sBan->RemoveBanAccount(accountName);
+                    break;
+                }
+                case AccountAction::Mute:
+                case AccountAction::Unmute:
+                {
+                    uint64 muteUntil = 0;
+                    if (command.action == AccountAction::Mute)
+                        muteUntil = GameTime::GetGameTime().count() + TimeStringToSecs(command.duration);
+                    LoginDatabasePreparedStatement* statement =
+                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_MUTE_TIME);
+                    statement->SetData(0, muteUntil);
+                    statement->SetData(1, command.reason);
+                    statement->SetData(2, "server-api");
+                    statement->SetData(3, command.accountId);
+                    LoginDatabase.Execute(statement);
+                    break;
+                }
+                case AccountAction::Delete:
+                    accountResult = AccountMgr::DeleteAccount(command.accountId);
+                    break;
+            }
+
+            LOG_INFO("server-api.accounts", "Account operation={} accountId={} result={}",
+                AccountActionName(command.action), command.accountId, AccountOperationResult(accountResult));
         }
 
         std::string BuildPlayerJson(PlayerSnapshot const& player, bool details)
@@ -288,10 +398,13 @@ namespace ServerApi
             }
 
             return Acore::StringFormat(
-                R"({{"guid":{},"name":"{}","level":{},"health":{{"current":{},"max":{}}},"power":{{"current":{},"max":{}}},"position":{{"mapId":{},"x":{},"y":{},"z":{},"orientation":{}}}}})",
-                player.guid, EscapeJson(player.name), player.level, player.health, player.maxHealth,
-                player.power, player.maxPower, player.mapId, player.x, player.y, player.z,
-                player.orientation);
+                R"({{"guid":{},"name":"{}","level":{},"class":{},"race":{},"mapId":{},"zoneId":{},)"
+                R"("online":true,"health":{{"current":{},"max":{}}},)"
+                R"("power":{{"current":{},"max":{}}},)"
+                R"("position":{{"mapId":{},"x":{},"y":{},"z":{},"orientation":{}}}}})",
+                player.guid, EscapeJson(player.name), player.level, player.playerClass, player.race,
+                player.mapId, player.zoneId, player.health, player.maxHealth, player.power,
+                player.maxPower, player.mapId, player.x, player.y, player.z, player.orientation);
         }
 
         std::string BuildPlayersResponse(std::string const& target)
@@ -300,8 +413,9 @@ namespace ServerApi
             std::string const name = QueryValue(target, "name");
 
             uint32_t mapId = 0;
-            bool const hasMapFilter = !QueryValue(target, "mapId").empty();
-            if (hasMapFilter && !ParseUnsigned(QueryValue(target, "mapId"), mapId))
+            std::string const mapIdValue = QueryValue(target, "mapId");
+            bool const hasMapFilter = !mapIdValue.empty();
+            if (hasMapFilter && !ParseUnsigned(mapIdValue, mapId))
                 return R"({"error":{"code":"INVALID_MAP_ID"}})";
 
             uint32_t limit = 100;
@@ -346,45 +460,13 @@ namespace ServerApi
             return body;
         }
 
-        bool ParsePlayerGuid(std::string const& path, uint64_t& guid)
-        {
-            std::string const prefix = "/api/v1/players/";
-            if (path.rfind(prefix, 0) != 0)
-                return false;
-
-            std::string const value = path.substr(prefix.size());
-            if (value.empty())
-                return false;
-            try
-            {
-                std::size_t parsed = 0;
-                guid = std::stoull(value, &parsed);
-                return parsed == value.size();
-            }
-            catch (std::exception const&)
-            {
-                return false;
-            }
-        }
-
         bool ParseResourceId(std::string const& path, std::string_view prefix, uint64_t& id)
         {
             if (path.rfind(prefix, 0) != 0)
                 return false;
 
             std::string const value = path.substr(prefix.size());
-            if (value.empty())
-                return false;
-            try
-            {
-                std::size_t parsed = 0;
-                id = std::stoull(value, &parsed);
-                return parsed == value.size();
-            }
-            catch (std::exception const&)
-            {
-                return false;
-            }
+            return ParseUnsigned(value, id);
         }
 
         bool ParsePlayerActionGuid(std::string const& path, std::string_view action, uint64_t& guid)
@@ -395,16 +477,7 @@ namespace ServerApi
                 return false;
 
             std::string const value = path.substr(prefix.size(), path.size() - prefix.size() - action.size());
-            try
-            {
-                std::size_t parsed = 0;
-                guid = std::stoull(value, &parsed);
-                return !value.empty() && parsed == value.size();
-            }
-            catch (std::exception const&)
-            {
-                return false;
-            }
+            return ParseUnsigned(value, guid);
         }
 
         bool ParseFloatQuery(std::string const& target, std::string_view key, float& value)
@@ -533,7 +606,8 @@ namespace ServerApi
         public:
             WebSocketSession(boost::asio::ip::tcp::socket socket, Config config,
                 std::shared_ptr<std::atomic_uint32_t> webSocketClients)
-                : _socket(std::move(socket)), _config(std::move(config)), _webSocketClients(std::move(webSocketClients)) { }
+                : _socket(std::move(socket)), _config(std::move(config)),
+                  _webSocketClients(std::move(webSocketClients)) { }
 
             ~WebSocketSession()
             {
@@ -544,9 +618,11 @@ namespace ServerApi
 
             void Start(WebSocketRequest request)
             {
-                _socket.set_option(boost::beast::websocket::stream_base::timeout::suggested(boost::beast::role_type::server));
+                _socket.set_option(
+                    boost::beast::websocket::stream_base::timeout::suggested(boost::beast::role_type::server));
                 _socket.read_message_max(_config.maxWebSocketFrameBytes);
-                _socket.set_option(boost::beast::websocket::stream_base::decorator([](boost::beast::websocket::response_type& response)
+                _socket.set_option(boost::beast::websocket::stream_base::decorator(
+                    [](boost::beast::websocket::response_type& response)
                 {
                     response.set(boost::beast::http::field::server, "mod-server-api");
                 }));
@@ -687,7 +763,8 @@ namespace ServerApi
 
                 _socket.text(true);
                 auto self = shared_from_this();
-                _socket.async_write(boost::asio::buffer(_writeQueue.front()), [self](boost::system::error_code error, std::size_t)
+                _socket.async_write(boost::asio::buffer(_writeQueue.front()),
+                    [self](boost::system::error_code error, std::size_t)
                 {
                     if (error)
                         return;
@@ -737,7 +814,8 @@ namespace ServerApi
         void ReadRequest()
         {
             auto self = shared_from_this();
-            _socket.async_read_some(boost::asio::buffer(_readBuffer), [self](boost::system::error_code error, std::size_t bytesRead)
+            _socket.async_read_some(boost::asio::buffer(_readBuffer),
+                [self](boost::system::error_code error, std::size_t bytesRead)
             {
                 if (error)
                     return;
@@ -780,24 +858,33 @@ namespace ServerApi
             }
 
             std::string const path = PathFromTarget(target);
+            bool const protectedEndpoint = path.starts_with("/api/v1/") || path == "/ws/v1/events";
+            if (protectedEndpoint && !HasValidBearerToken(_request, _config))
+            {
+                WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})",
+                    "WWW-Authenticate: Bearer\r\n");
+                return;
+            }
+
             if (path == "/health")
             {
+                if (!RequireMethod(method, "GET"))
+                    return;
                 WriteResponse(200, "OK", R"({"status":"ok"})");
             }
             else if (path == "/ready")
             {
+                if (!RequireMethod(method, "GET"))
+                    return;
                 WriteResponse(200, "OK", R"({"status":"ready"})");
             }
             else if (path == "/ws/v1/events")
             {
+                if (!RequireMethod(method, "GET"))
+                    return;
                 if (!_config.webSocketEnabled)
                 {
                     WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
-                    return;
-                }
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
                     return;
                 }
 
@@ -817,11 +904,8 @@ namespace ServerApi
             }
             else if (path == "/api/v1/server" || path == "/api/v1/server/metrics")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
+                if (!RequireMethod(method, "GET"))
                     return;
-                }
 
                 if (path == "/api/v1/server")
                     WriteResponse(200, "OK", BuildServerResponse());
@@ -830,11 +914,8 @@ namespace ServerApi
             }
             else if (path == "/api/v1/groups" || path.rfind("/api/v1/groups/", 0) == 0)
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
+                if (!RequireMethod(method, "GET"))
                     return;
-                }
 
                 if (path == "/api/v1/groups")
                 {
@@ -862,11 +943,8 @@ namespace ServerApi
             }
             else if (path == "/api/v1/instances" || path.rfind("/api/v1/instances/", 0) == 0)
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
+                if (!RequireMethod(method, "GET"))
                     return;
-                }
 
                 if (path == "/api/v1/instances")
                 {
@@ -881,7 +959,8 @@ namespace ServerApi
                     return;
                 }
                 std::vector<InstanceSnapshot> const instances = GetInstanceSnapshots();
-                auto const instance = std::find_if(instances.begin(), instances.end(), [id](InstanceSnapshot const& item)
+                auto const instance = std::find_if(instances.begin(), instances.end(),
+                    [id](InstanceSnapshot const& item)
                 {
                     return item.instanceId == id;
                 });
@@ -894,11 +973,8 @@ namespace ServerApi
             }
             else if (path == "/api/v1/bots")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
+                if (!RequireMethod(method, "GET"))
                     return;
-                }
 
 #ifdef MOD_PLAYERBOTS
                 WriteResponse(200, "OK", BuildBotsResponse());
@@ -908,12 +984,6 @@ namespace ServerApi
             }
             else if (path == "/api/v1/accounts" || path.rfind("/api/v1/accounts/", 0) == 0)
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 std::string const prefix = "/api/v1/accounts/";
                 if (method == "GET" && path.ends_with("/characters"))
                 {
@@ -924,7 +994,8 @@ namespace ServerApi
                         WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT"}})");
                         return;
                     }
-                    if (BuildAccountJson(accountId).empty())
+                    std::string accountName;
+                    if (!AccountMgr::GetName(accountId, accountName))
                     {
                         WriteResponse(404, "Not Found", R"({"error":{"code":"ACCOUNT_NOT_FOUND"}})");
                         return;
@@ -960,15 +1031,13 @@ namespace ServerApi
                         WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT_CREATE"}})");
                         return;
                     }
-                    if (!GetCommandQueue().Enqueue([username, password, email]
+                    if (!EnqueueCommand([username, password, email]
                     {
                         AccountOpResult const result = sAccountMgr->CreateAccount(username, password, email);
-                        LOG_INFO("server-api.accounts", "Account create '{}' result={}", username, AccountOperationResult(result));
+                        LOG_INFO("server-api.accounts", "Account create '{}' result={}", username,
+                            AccountOperationResult(result));
                     }))
-                    {
-                        WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                         return;
-                    }
                     WriteResponse(202, "Accepted", R"({"status":"queued","operation":"account.create"})");
                     return;
                 }
@@ -998,150 +1067,91 @@ namespace ServerApi
                     return;
                 }
 
-                if (action == "delete" && QueryValue(target, "confirm") != "DELETE")
+                AccountCommand command;
+                command.accountId = accountId;
+                if (!ParseAccountAction(action, command.action))
+                {
+                    WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
+                    return;
+                }
+
+                if (command.action == AccountAction::Delete && QueryValue(target, "confirm") != "DELETE")
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"DELETE_CONFIRMATION_REQUIRED"}})");
                     return;
                 }
 
-                std::string const password = QueryValue(target, "password");
-                std::string const email = QueryValue(target, "email");
-                std::string const username = QueryValue(target, "username");
+                command.password = QueryValue(target, "password");
+                command.email = QueryValue(target, "email");
+                command.username = QueryValue(target, "username");
                 std::string const value = QueryValue(target, "value");
-                std::string const duration = QueryValue(target, "duration");
-                std::string const reason = QueryValue(target, "reason");
-                if (action == "password" && password.empty())
+                command.duration = QueryValue(target, "duration");
+                command.reason = QueryValue(target, "reason");
+                if (command.action == AccountAction::Password && command.password.empty())
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"PASSWORD_REQUIRED"}})");
                     return;
                 }
-                if (action == "email" && email.empty())
+                if (command.action == AccountAction::Email && command.email.empty())
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"EMAIL_REQUIRED"}})");
                     return;
                 }
-                if (action == "username" && (username.empty() || password.empty()))
+                if (command.action == AccountAction::Username &&
+                    (command.username.empty() || command.password.empty()))
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"USERNAME_AND_PASSWORD_REQUIRED"}})");
                     return;
                 }
-                if ((action == "lock" || action == "expansion" || action == "flags") && value.empty())
+                bool const needsValue = command.action == AccountAction::Lock ||
+                    command.action == AccountAction::Expansion || command.action == AccountAction::Flags;
+                if (needsValue && value.empty())
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"VALUE_REQUIRED"}})");
                     return;
                 }
-                if (action == "ban" && duration.empty())
+                if (needsValue && (!ParseUnsigned(value, command.value) ||
+                    (command.action == AccountAction::Lock && command.value > 1) ||
+                    (command.action == AccountAction::Expansion &&
+                        command.value > EXPANSION_WRATH_OF_THE_LICH_KING)))
+                {
+                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_VALUE"}})");
+                    return;
+                }
+                if ((command.action == AccountAction::Ban || command.action == AccountAction::Mute) &&
+                    command.duration.empty())
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"DURATION_REQUIRED"}})");
                     return;
                 }
-                if (action == "mute" && duration.empty())
+                if ((command.action == AccountAction::Ban || command.action == AccountAction::Mute) &&
+                    TimeStringToSecs(command.duration) == 0)
                 {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"DURATION_REQUIRED"}})");
+                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_DURATION"}})");
                     return;
                 }
 
-                if (!GetCommandQueue().Enqueue([accountId, action, password, email, username, value, duration, reason]
+                if (!EnqueueCommand([command]
                 {
-                    std::string accountName;
-                    AccountMgr::GetName(accountId, accountName);
-                    AccountOpResult accountResult = AOR_OK;
-                    if (action == "password")
-                        accountResult = AccountMgr::ChangePassword(accountId, password);
-                    else if (action == "email")
-                        accountResult = AccountMgr::ChangeEmail(accountId, email);
-                    else if (action == "username")
-                        accountResult = AccountMgr::ChangeUsername(accountId, username, password);
-                    else if (action == "delete")
-                        accountResult = AccountMgr::DeleteAccount(accountId);
-                else if (action == "lock" || action == "expansion")
-                    {
-                        uint32_t numericValue = 0;
-                        try { numericValue = static_cast<uint32_t>(std::stoul(value)); }
-                        catch (...) { LOG_WARN("server-api.accounts", "Invalid numeric value for {}", action); return; }
-                        if (action == "lock")
-                        {
-                            LoginDatabasePreparedStatement* statement = LoginDatabase.GetPreparedStatement(LOGIN_UPD_ACCOUNT_LOCK);
-                            statement->SetData(0, numericValue != 0);
-                            statement->SetData(1, accountId);
-                            LoginDatabase.Execute(statement);
-                        }
-                        else
-                        {
-                            LoginDatabasePreparedStatement* statement = LoginDatabase.GetPreparedStatement(LOGIN_UPD_EXPANSION);
-                            statement->SetData(0, numericValue);
-                            statement->SetData(1, accountId);
-                            LoginDatabase.Execute(statement);
-                        }
-                    }
-                    else if (action == "flags")
-                    {
-                        uint32_t numericValue = 0;
-                        try { numericValue = static_cast<uint32_t>(std::stoul(value)); }
-                        catch (...) { LOG_WARN("server-api.accounts", "Invalid flags value"); return; }
-                        LoginDatabasePreparedStatement* statement = LoginDatabase.GetPreparedStatement(LOGIN_UPD_SET_ACCOUNT_FLAG);
-                        statement->SetData(0, numericValue);
-                        statement->SetData(1, accountId);
-                        LoginDatabase.Execute(statement);
-                    }
-                    else if (action == "mute" || action == "unmute")
-                    {
-                        uint64 muteUntil = 0;
-                        if (action == "mute")
-                            muteUntil = GameTime::GetGameTime().count() + TimeStringToSecs(duration);
-                        LoginDatabasePreparedStatement* statement = LoginDatabase.GetPreparedStatement(LOGIN_UPD_MUTE_TIME);
-                        statement->SetData(0, muteUntil);
-                        statement->SetData(1, reason);
-                        statement->SetData(2, "server-api");
-                        statement->SetData(3, accountId);
-                        LoginDatabase.Execute(statement);
-                    }
-                    else if (action == "ban")
-                        sBan->BanAccount(accountName, duration, reason.empty() ? "server-api" : reason, "server-api");
-                    else if (action == "unban")
-                        sBan->RemoveBanAccount(accountName);
-                    else
-                    {
-                        LOG_WARN("server-api.accounts", "Unknown account operation {}", action);
-                        return;
-                    }
-                    LOG_INFO("server-api.accounts", "Account operation={} accountId={} result={}", action, accountId, AccountOperationResult(accountResult));
+                    ExecuteAccountCommand(command);
                 }))
-                {
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                     return;
-                }
                 WriteResponse(202, "Accepted", Acore::StringFormat(
-                    R"({{"status":"queued","operation":"account.{}","accountId":{}}})", action, accountId));
+                    R"({{"status":"queued","operation":"account.{}","accountId":{}}})",
+                    AccountActionName(command.action), accountId));
                 return;
             }
 #ifdef MOD_DUNGEON_CLEAR
-            else if (path == "/api/v1/dungeon-clear/dungeons")
+            else if (method == "GET" && path == "/api/v1/dungeon-clear/dungeons")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
                 WriteResponse(200, "OK", DungeonClearServerApi::CatalogJson());
             }
-            else if (path == "/api/v1/dungeon-clear/runs")
+            else if (method == "GET" && path == "/api/v1/dungeon-clear/runs")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
                 WriteResponse(200, "OK", DungeonClearServerApi::RunsJson());
             }
             else if (method == "POST" && path == "/api/v1/dungeon-clear/runs/start")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 DungeonClearServerApi::StartRequest request;
                 std::string errorBody;
                 if (!ParseDungeonClearStartRequest(target, request, errorBody))
@@ -1150,17 +1160,14 @@ namespace ServerApi
                     return;
                 }
 
-                if (!GetCommandQueue().Enqueue([request]
+                if (!EnqueueCommand([request]
                 {
                     std::string message;
                     std::string runId;
                     if (!DungeonClearServerApi::Start(request, &message, &runId))
                         LOG_WARN("server-api.dungeon-clear", "Start rejected: {}", message);
                 }))
-                {
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                     return;
-                }
 
                 WriteResponse(202, "Accepted", Acore::StringFormat(
                     R"({{"status":"queued","operation":"dungeon-clear.start","dungeon":"{}"}})",
@@ -1168,28 +1175,19 @@ namespace ServerApi
             }
             else if (method == "POST" && path == "/api/v1/dungeon-clear/runs/stop")
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 std::string const selector = QueryValue(target, "selector");
                 if (selector.empty())
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_SELECTOR"}})");
                     return;
                 }
-                if (!GetCommandQueue().Enqueue([selector]
+                if (!EnqueueCommand([selector]
                 {
                     std::string message;
                     if (!DungeonClearServerApi::Stop(selector, &message))
                         LOG_WARN("server-api.dungeon-clear", "Stop rejected: {}", message);
                 }))
-                {
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                     return;
-                }
                 WriteResponse(202, "Accepted", Acore::StringFormat(
                     R"({{"status":"queued","operation":"dungeon-clear.stop","selector":"{}"}})",
                     EscapeJson(selector)));
@@ -1200,17 +1198,12 @@ namespace ServerApi
                      path == "/api/v1/dungeon-clear/runs/start" ||
                      path == "/api/v1/dungeon-clear/runs/stop")
             {
-                WriteResponse(501, "Not Implemented", R"({"error":{"code":"NOT_SUPPORTED","feature":"mod-dungeon-clear"}})");
+                WriteResponse(501, "Not Implemented",
+                    R"({"error":{"code":"NOT_SUPPORTED","feature":"mod-dungeon-clear"}})");
             }
 #endif
             else if (method == "POST" && path.rfind("/api/v1/players/", 0) == 0 && path.ends_with("/teleport"))
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 uint64_t guid = 0;
                 uint32_t mapId = 0;
                 float x = 0.0f;
@@ -1226,7 +1219,7 @@ namespace ServerApi
                     return;
                 }
 
-                if (!GetCommandQueue().Enqueue([guid, mapId, x, y, z, orientation]
+                if (!EnqueueCommand([guid, mapId, x, y, z, orientation]
                 {
                     sWorldSessionMgr->DoForAllOnlinePlayers([guid, mapId, x, y, z, orientation](Player* player)
                     {
@@ -1234,23 +1227,15 @@ namespace ServerApi
                             player->TeleportTo(mapId, x, y, z, orientation);
                     });
                 }))
-                {
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                     return;
-                }
 
                 WriteResponse(202, "Accepted", Acore::StringFormat(
-                    R"({{"status":"queued","operation":"player.teleport","guid":{},"mapId":{},"x":{},"y":{},"z":{},"orientation":{}}})",
+                    R"({{"status":"queued","operation":"player.teleport","guid":{},"mapId":{},)"
+                    R"("x":{},"y":{},"z":{},"orientation":{}}})",
                     guid, mapId, x, y, z, orientation));
             }
             else if (method == "POST" && path.rfind("/api/v1/players/", 0) == 0 && path.ends_with("/kick"))
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 uint64_t guid = 0;
                 if (!ParsePlayerActionGuid(path, "/kick", guid))
                 {
@@ -1258,7 +1243,7 @@ namespace ServerApi
                     return;
                 }
 
-                if (!GetCommandQueue().Enqueue([guid]
+                if (!EnqueueCommand([guid]
                 {
                     sWorldSessionMgr->DoForAllOnlinePlayers([guid](Player* player)
                     {
@@ -1266,22 +1251,13 @@ namespace ServerApi
                             player->GetSession()->KickPlayer("Server API", false);
                     });
                 }))
-                {
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
                     return;
-                }
 
                 WriteResponse(202, "Accepted", Acore::StringFormat(
                     R"({{"status":"queued","operation":"player.kick","guid":{}}})", guid));
             }
             else if (method == "GET" && (path == "/api/v1/players" || path.rfind("/api/v1/players/", 0) == 0))
             {
-                if (!HasValidBearerToken(_request, _config))
-                {
-                    WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})", "WWW-Authenticate: Bearer\r\n");
-                    return;
-                }
-
                 if (path == "/api/v1/players")
                 {
                     std::string const body = BuildPlayersResponse(target);
@@ -1293,7 +1269,7 @@ namespace ServerApi
                 }
 
                 uint64_t guid = 0;
-                if (!ParsePlayerGuid(path, guid))
+                if (!ParseResourceId(path, "/api/v1/players/", guid))
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_GUID"}})");
                     return;
@@ -1315,6 +1291,25 @@ namespace ServerApi
             {
                 WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
             }
+        }
+
+        bool RequireMethod(std::string_view actual, std::string_view expected)
+        {
+            if (actual == expected)
+                return true;
+
+            WriteResponse(405, "Method Not Allowed", R"({"error":{"code":"METHOD_NOT_ALLOWED"}})",
+                Acore::StringFormat("Allow: {}\r\n", expected));
+            return false;
+        }
+
+        bool EnqueueCommand(std::function<void()> command)
+        {
+            if (GetCommandQueue().Enqueue(std::move(command)))
+                return true;
+
+            WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
+            return false;
         }
 
         WebSocketRequest BuildWebSocketRequest(std::string const& target) const
@@ -1342,11 +1337,13 @@ namespace ServerApi
             return request;
         }
 
-        void WriteResponse(uint16_t status, std::string_view reason, std::string_view body, std::string_view headers = {})
+        void WriteResponse(uint16_t status, std::string_view reason, std::string_view body,
+            std::string_view headers = {})
         {
             _response = BuildResponse(status, reason, body, headers);
             auto self = shared_from_this();
-            boost::asio::async_write(_socket, boost::asio::buffer(_response), [self](boost::system::error_code, std::size_t)
+            boost::asio::async_write(_socket, boost::asio::buffer(_response),
+                [self](boost::system::error_code, std::size_t)
             {
                 boost::system::error_code ignored;
                 self->_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
@@ -1386,14 +1383,17 @@ namespace ServerApi
         }
 
         _acceptor.open(address.is_v6() ? boost::asio::ip::tcp::v6() : boost::asio::ip::tcp::v4(), error);
-        _acceptor.set_option(boost::asio::socket_base::reuse_address(true), error);
-        _acceptor.bind(boost::asio::ip::tcp::endpoint(address, _config.port), error);
+        if (!error)
+            _acceptor.set_option(boost::asio::socket_base::reuse_address(true), error);
+        if (!error)
+            _acceptor.bind(boost::asio::ip::tcp::endpoint(address, _config.port), error);
         if (!error)
             _acceptor.listen(boost::asio::socket_base::max_listen_connections, error);
 
         if (error)
         {
-            LOG_ERROR("server-api.http", "Could not bind {}:{}: {}", _config.bindAddress, _config.port, error.message());
+            LOG_ERROR("server-api.http", "Could not bind {}:{}: {}", _config.bindAddress, _config.port,
+                error.message());
             _acceptor.close();
             _running = false;
             return false;
@@ -1429,7 +1429,8 @@ namespace ServerApi
         _acceptor.async_accept([this](boost::system::error_code error, boost::asio::ip::tcp::socket socket)
         {
             if (!error)
-                std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients, _requestRateLimiter)->Start();
+                std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
+                    _requestRateLimiter)->Start();
 
             if (_running)
                 AcceptNext();

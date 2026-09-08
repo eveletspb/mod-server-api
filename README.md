@@ -108,6 +108,8 @@ The list response has the following shape:
 ```
 
 The detail response additionally contains `health`, `power` and `position`.
+`power` uses the player's active class power type (mana, rage, energy or runic
+power).
 
 ### Groups
 
@@ -206,6 +208,8 @@ to the world thread.
 
 All write operations return `202 Accepted`. Account deletion is intentionally
 guarded by the exact `confirm=DELETE` parameter.
+`lock` accepts only `0` or `1`, expansion accepts the WotLK range `0..2`, and
+invalid numeric values or durations are rejected before a command is queued.
 
 ### Commands
 
@@ -312,11 +316,14 @@ aggregator.
 
 | Status | Meaning |
 |---:|---|
-| `400` | Invalid method, GUID, map ID or limit |
+| `400` | Invalid request or command parameters |
 | `401` | Missing or invalid Bearer token |
 | `404` | Unknown endpoint or player not found |
+| `405` | Known endpoint called with an unsupported method |
 | `413` | Request exceeds `ServerApi.MaxRequestBytes` |
 | `429` | Global HTTP request rate limit exceeded |
+| `501` | Optional integration is unavailable |
+| `503` | Command queue or WebSocket client limit reached |
 
 ### cURL examples
 
@@ -453,6 +460,10 @@ ctest --test-dir /path/to/azerothcore-wotlk/build \
 
 Run API contract tests against a running worldserver:
 
+```bash
+SERVER_API_KEY='test-secret-key' ./tests/test_api_contract.sh
+```
+
 For labelled manual curl checks, run:
 
 ```bash
@@ -498,10 +509,6 @@ node ./tests/test-websocket-limit.js
 
 The test passes when at least one connection is rejected with the configured
 `503 WS_CLIENT_LIMIT` behavior.
-
-```bash
-SERVER_API_KEY='test-secret-key' ./tests/test_api_contract.sh
-```
 
 ## Development
 

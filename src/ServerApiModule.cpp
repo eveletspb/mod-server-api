@@ -94,9 +94,23 @@ namespace
             WORLDHOOK_ON_SHUTDOWN
         }) { }
 
-        void OnBeforeConfigLoad(bool /*reload*/) override
+        void OnBeforeConfigLoad(bool reload) override
         {
-            _config = ServerApi::LoadConfig();
+            ServerApi::Config const loadedConfig = ServerApi::LoadConfig();
+            if (!reload || !_started)
+            {
+                _config = loadedConfig;
+                return;
+            }
+
+            if (loadedConfig.positionUpdatesIntervalMs > 0 && loadedConfig.combatSnapshotIntervalMs > 0)
+            {
+                _config.positionUpdatesIntervalMs = loadedConfig.positionUpdatesIntervalMs;
+                _config.combatSnapshotIntervalMs = loadedConfig.combatSnapshotIntervalMs;
+            }
+
+            LOG_INFO("server-api.config",
+                "Sampling intervals reloaded; listener, authentication and limit changes require restart");
         }
 
         void OnStartup() override
@@ -127,13 +141,13 @@ namespace
             if (!_started)
                 return;
 
+            ServerApi::GetCommandQueue().Drain(100);
             _snapshotTimer += diff;
+            _combatTimer += diff;
             if (_snapshotTimer < _config.positionUpdatesIntervalMs)
                 return;
 
             _snapshotTimer = 0;
-            ServerApi::GetCommandQueue().Drain(100);
-            _combatTimer += diff;
             std::vector<ServerApi::PlayerSnapshot> const previousPlayers = _players;
             std::vector<ServerApi::GroupSnapshot> const previousGroups = _groups;
             std::vector<ServerApi::InstanceSnapshot> const previousInstances = _instances;
@@ -148,7 +162,8 @@ namespace
                 for (ServerApi::PlayerSnapshot const& player : _players)
                 {
                     if (player.inCombat)
-                        ServerApi::Publish("combat.snapshot", BuildCombatSnapshotEventData(player), ServerApi::EventPriority::Telemetry);
+                        ServerApi::Publish("combat.snapshot", BuildCombatSnapshotEventData(player),
+                            ServerApi::EventPriority::Telemetry);
                 }
             }
         }
@@ -166,6 +181,7 @@ namespace
             _groups.clear();
             _instances.clear();
             _players.clear();
+            _snapshotTimer = 0;
             _combatTimer = 0;
         }
 
@@ -179,31 +195,36 @@ namespace
         {
             for (ServerApi::PlayerSnapshot const& player : players)
             {
-                auto const previous = std::find_if(previousPlayers.begin(), previousPlayers.end(), [&player](ServerApi::PlayerSnapshot const& item)
+                auto const previous = std::find_if(previousPlayers.begin(), previousPlayers.end(),
+                    [&player](ServerApi::PlayerSnapshot const& item)
                 {
                     return item.guid == player.guid;
                 });
                 if (previous != previousPlayers.end() &&
                     (previous->mapId != player.mapId || previous->x != player.x || previous->y != player.y ||
                      previous->z != player.z || previous->orientation != player.orientation))
-                    ServerApi::Publish("player.position", BuildPlayerPositionEventData(player), ServerApi::EventPriority::Telemetry);
+                    ServerApi::Publish("player.position", BuildPlayerPositionEventData(player),
+                        ServerApi::EventPriority::Telemetry);
             }
 
             for (ServerApi::GroupSnapshot const& group : groups)
             {
-                auto const previous = std::find_if(previousGroups.begin(), previousGroups.end(), [&group](ServerApi::GroupSnapshot const& item)
+                auto const previous = std::find_if(previousGroups.begin(), previousGroups.end(),
+                    [&group](ServerApi::GroupSnapshot const& item)
                 {
                     return item.id == group.id;
                 });
                 if (previous == previousGroups.end())
                     ServerApi::Publish("group.created", BuildGroupEventData(group));
-                else if (previous->leaderGuid != group.leaderGuid || previous->raid != group.raid || previous->memberGuids != group.memberGuids)
+                else if (previous->leaderGuid != group.leaderGuid || previous->raid != group.raid ||
+                    previous->memberGuids != group.memberGuids)
                     ServerApi::Publish("group.updated", BuildGroupEventData(group));
             }
 
             for (ServerApi::GroupSnapshot const& group : previousGroups)
             {
-                auto const current = std::find_if(groups.begin(), groups.end(), [&group](ServerApi::GroupSnapshot const& item)
+                auto const current = std::find_if(groups.begin(), groups.end(),
+                    [&group](ServerApi::GroupSnapshot const& item)
                 {
                     return item.id == group.id;
                 });
@@ -213,19 +234,22 @@ namespace
 
             for (ServerApi::InstanceSnapshot const& instance : instances)
             {
-                auto const previous = std::find_if(previousInstances.begin(), previousInstances.end(), [&instance](ServerApi::InstanceSnapshot const& item)
+                auto const previous = std::find_if(previousInstances.begin(), previousInstances.end(),
+                    [&instance](ServerApi::InstanceSnapshot const& item)
                 {
                     return item.instanceId == instance.instanceId;
                 });
                 if (previous == previousInstances.end())
                     ServerApi::Publish("instance.started", BuildInstanceEventData(instance));
-                else if (previous->mapId != instance.mapId || previous->difficulty != instance.difficulty || previous->players != instance.players)
+                else if (previous->mapId != instance.mapId || previous->difficulty != instance.difficulty ||
+                    previous->players != instance.players)
                     ServerApi::Publish("instance.updated", BuildInstanceEventData(instance));
             }
 
             for (ServerApi::InstanceSnapshot const& instance : previousInstances)
             {
-                auto const current = std::find_if(instances.begin(), instances.end(), [&instance](ServerApi::InstanceSnapshot const& item)
+                auto const current = std::find_if(instances.begin(), instances.end(),
+                    [&instance](ServerApi::InstanceSnapshot const& item)
                 {
                     return item.instanceId == instance.instanceId;
                 });

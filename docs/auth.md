@@ -46,10 +46,11 @@ receives `503 WS_CLIENT_LIMIT`.
 
 | Status | Meaning |
 |---:|---|
-| `400` | Invalid path, query or command parameters |
+| `400` | Invalid request or command parameters |
 | `401` | Missing or invalid token when auth is enabled |
 | `404` | Endpoint or runtime resource not found |
+| `405` | Known endpoint called with an unsupported HTTP method |
 | `413` | Request exceeds configured size limit |
 | `429` | Global HTTP request rate limit exceeded |
-| `501` | Optional playerbots integration is unavailable |
-| `503` | World-thread command queue is full |
+| `501` | An optional module integration is unavailable |
+| `503` | Command queue or WebSocket client limit reached |

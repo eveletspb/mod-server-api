@@ -25,7 +25,9 @@ namespace ServerApi
     struct PlayerSnapshot
     {
         uint64_t guid = 0;
+        uint32_t accountId = 0;
         std::string name;
+        std::string remoteAddress;
         uint8_t level = 0;
         uint8_t playerClass = 0;
         uint8_t race = 0;
@@ -35,6 +37,7 @@ namespace ServerApi
         uint32_t maxHealth = 0;
         uint32_t power = 0;
         uint32_t maxPower = 0;
+        uint32_t latency = 0;
         bool bot = false;
         bool inCombat = false;
         uint64_t victimGuid = 0;

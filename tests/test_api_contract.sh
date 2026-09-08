@@ -50,8 +50,12 @@ assert_response "health" 200 '"status":"ok"' \
     "$BASE_URL/health"
 assert_response "ready" 200 '"status":"ready"' \
     "$BASE_URL/ready"
+assert_response "health rejects POST" 405 'METHOD_NOT_ALLOWED' \
+    -X POST "$BASE_URL/health"
 assert_response "missing auth" 401 'UNAUTHORIZED' \
     "$BASE_URL/api/v1/server"
+assert_response "optional endpoint missing auth" 401 'UNAUTHORIZED' \
+    "$BASE_URL/api/v1/dungeon-clear/dungeons"
 assert_response "invalid auth" 401 'UNAUTHORIZED' \
     -H 'Authorization: Bearer invalid' "$BASE_URL/api/v1/server"
 assert_response "server" 200 'playersOnline' \
@@ -101,6 +105,12 @@ if [[ -n "$ACCOUNT_ID" ]]; then
         -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/$ACCOUNT_ID"
     assert_response "account characters" 200 '"data"' \
         -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/$ACCOUNT_ID/characters"
+    assert_response "unknown account action" 404 'NOT_FOUND' \
+        -X POST -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/$ACCOUNT_ID/unknown"
+    assert_response "invalid account value" 400 'INVALID_VALUE' \
+        -X POST -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/$ACCOUNT_ID/lock?value=2"
+    assert_response "invalid account duration" 400 'INVALID_DURATION' \
+        -X POST -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/$ACCOUNT_ID/mute?duration=invalid"
 else
     echo "SKIP: account checks (set SERVER_API_ACCOUNT_ID)"
 fi
