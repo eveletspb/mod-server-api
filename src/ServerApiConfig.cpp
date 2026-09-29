@@ -12,12 +12,12 @@ namespace ServerApi
     Config LoadConfig()
     {
         Config config;
-        config.enabled = sConfigMgr->GetOption<bool>("ServerApi.Enable", false);
+        config.enabled = sConfigMgr->GetOption<bool>("ServerApi.Enable", true);
         config.bindAddress = sConfigMgr->GetOption<std::string>("ServerApi.BindAddress", "127.0.0.1");
         config.port = sConfigMgr->GetOption<uint16_t>("ServerApi.Port", 7878);
         config.maxRequestBytes = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestBytes", 1024 * 1024);
         config.maxRequestsPerSecond = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestsPerSecond", 1000);
-        config.authEnabled = sConfigMgr->GetOption<bool>("ServerApi.Auth.Enable", true);
+        config.authEnabled = sConfigMgr->GetOption<bool>("ServerApi.Auth.Enable", false);
         config.apiKey = sConfigMgr->GetOption<std::string>("ServerApi.Auth.ApiKey", "");
         config.webSocketEnabled = sConfigMgr->GetOption<bool>("ServerApi.WebSocket.Enable", true);
         config.maxWebSocketFrameBytes =

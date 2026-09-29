@@ -34,7 +34,7 @@ namespace ServerApi
 
     void EventBus::Start()
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_queueMutex);
         if (_running)
             return;
 
@@ -45,7 +45,7 @@ namespace ServerApi
     void EventBus::Stop()
     {
         {
-            std::lock_guard<std::mutex> lock(_mutex);
+            std::lock_guard<std::mutex> lock(_queueMutex);
             if (!_running && !_thread.joinable())
                 return;
 
@@ -56,13 +56,13 @@ namespace ServerApi
         if (_thread.joinable())
             _thread.join();
 
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_queueMutex);
         _queue.clear();
     }
 
     bool EventBus::Publish(ApiEvent event)
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_queueMutex);
         if (!_running)
             return false;
 
@@ -97,7 +97,7 @@ namespace ServerApi
 
     SubscriptionId EventBus::Subscribe(std::string eventPattern, EventHandler handler)
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_subscriptionsMutex);
         SubscriptionId const id = _nextSubscriptionId++;
         _subscriptions.push_back({id, std::move(eventPattern), std::move(handler)});
         return id;
@@ -105,7 +105,7 @@ namespace ServerApi
 
     void EventBus::Unsubscribe(SubscriptionId subscriptionId)
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_subscriptionsMutex);
         _subscriptions.erase(std::remove_if(_subscriptions.begin(), _subscriptions.end(),
             [subscriptionId](Subscription const& subscription)
         {
@@ -115,13 +115,13 @@ namespace ServerApi
 
     std::size_t EventBus::QueueSize() const
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_queueMutex);
         return _queue.size();
     }
 
     uint64_t EventBus::DroppedCount() const
     {
-        std::lock_guard<std::mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_queueMutex);
         return _droppedCount;
     }
 
@@ -133,7 +133,7 @@ namespace ServerApi
             std::vector<EventHandler> handlers;
 
             {
-                std::unique_lock<std::mutex> lock(_mutex);
+                std::unique_lock<std::mutex> lock(_queueMutex);
                 _condition.wait(lock, [this]
                 {
                     return !_running || !_queue.empty();
@@ -144,12 +144,13 @@ namespace ServerApi
 
                 event = std::move(_queue.front());
                 _queue.pop_front();
+            }
 
+            {
+                std::lock_guard<std::mutex> lock(_subscriptionsMutex);
                 for (Subscription const& subscription : _subscriptions)
-                {
                     if (Matches(subscription.pattern, event.type))
                         handlers.push_back(subscription.handler);
-                }
             }
 
             for (EventHandler const& handler : handlers)

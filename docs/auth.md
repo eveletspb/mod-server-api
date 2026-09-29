@@ -1,10 +1,12 @@
 # Authentication
 
-The API is local-first and disabled by default.
+The API is enabled by default on `127.0.0.1` without authentication. Authorization
+scopes and RBAC are not implemented; all authenticated clients currently have
+the same access to the exposed endpoints.
 
 ## Bearer authentication
 
-Recommended configuration:
+To enable Bearer authentication:
 
 ```ini
 ServerApi.Enable = 1
@@ -21,9 +23,9 @@ Authorization: Bearer change-this-secret
 
 Never commit a production key to the repository or log it.
 
-## Explicit no-auth mode
+## No-auth mode
 
-For a trusted local deployment:
+This is the default for the trusted local listener:
 
 ```ini
 ServerApi.Enable = 1

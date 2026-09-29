@@ -30,10 +30,45 @@ The event is delivered asynchronously to WebSocket subscribers. Do not pass
 `Player*`, `Map*`, `Group*`, `WorldSession*` or other raw core pointers in the
 event data. Keep event producers on the world thread and send strings only.
 
+## Registering a module API
+
+A feature module can register one handler for its own namespace. Registration is
+performed during module startup and does not require a token: all modules are
+compiled into the trusted worldserver process. The registry rejects invalid
+names, duplicate registrations and conflicting namespaces.
+
+```cpp
+#include "ServerApi/ModuleRegistry.h"
+
+ServerApi::GetModuleRegistry().Register(
+    {"dungeon-clear", "1.0.0", {"dungeons", "runs"}},
+    [](ServerApi::ModuleApiRequest const& request)
+        -> std::optional<ServerApi::ModuleApiResponse>
+    {
+        if (request.method != "GET" || request.path != "/api/v1/mod/dungeon-clear/runs")
+            return std::nullopt;
+
+        return ServerApi::ModuleApiResponse{
+            200, "OK", BuildRunsSnapshotJson(), {}};
+    });
+```
+
+The handler is called on the API IO worker and must not access `Player*`,
+`Map*`, `WorldSession*` or other world objects. It may read a module-owned,
+thread-safe value snapshot. Mutations must enqueue a world-thread command and
+return `202 Accepted` only when the enqueue succeeds. Authentication, global
+rate limiting and the `/api/v1/mod/<module>/...` namespace boundary are enforced by
+`mod-server-api`.
+
+Handlers should return `std::nullopt` for paths they do not own. Exceptions are
+converted to a generic `500 MODULE_HANDLER_FAILED` response and are not allowed
+to escape into the API worker.
+
 ## Adding a new REST read endpoint
 
 1. Collect data in `ServerSnapshot` on the world thread.
-2. Add a copy-returning getter guarded by the snapshot mutex.
+2. Publish immutable snapshot storage under the snapshot mutex and copy DTOs
+   only after releasing it.
 3. Serialize only the copied DTO in `ApiServer.cpp`.
 4. Apply Bearer validation, path/query validation and bounded payload rules.
 5. Update `README.md`, `docs/openapi.yaml` and `docs/project-context.md`.
@@ -42,7 +77,8 @@ event data. Keep event producers on the world thread and send strings only.
 
 Never mutate AzerothCore objects from the HTTP worker. Enqueue a lambda in the
 bounded `ServerApi::CommandQueue` and execute it from `ServerApiWorldScript`
-on the next world update. Return `202 Accepted` only after enqueue succeeds.
+on the next world update. Commands must remain lightweight and are drained with
+a 2 ms budget per update. Return `202 Accepted` only after enqueue succeeds.
 
 ## Optional playerbots integration
 

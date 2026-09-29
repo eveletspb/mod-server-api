@@ -12,12 +12,12 @@ namespace ServerApi
 {
     struct Config
     {
-        bool enabled = false;
+        bool enabled = true;
         std::string bindAddress = "127.0.0.1";
         uint16_t port = 7878;
         uint32_t maxRequestBytes = 1024 * 1024;
         uint32_t maxRequestsPerSecond = 1000;
-        bool authEnabled = true;
+        bool authEnabled = false;
         std::string apiKey;
         bool webSocketEnabled = true;
         uint32_t maxWebSocketFrameBytes = 1024 * 1024;

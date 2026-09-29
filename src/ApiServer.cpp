@@ -6,19 +6,14 @@
 #include "ServerApi/CommandQueue.h"
 #include "ServerApi/EventBus.h"
 #include "ServerApi/HttpUtils.h"
+#include "ServerApi/ModuleRegistry.h"
 #include "ServerApi/ServerSnapshot.h"
 
-#include "AccountMgr.h"
-#include "BanMgr.h"
-#include "DatabaseEnv.h"
-#include "GameTime.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
+#include "ObjectGuid.h"
 #include "Player.h"
-#include "Realm.h"
-#include "SharedDefines.h"
 #include "StringFormat.h"
-#include "Util.h"
-#include "WorldSessionMgr.h"
 
 #include <algorithm>
 #include <array>
@@ -27,14 +22,11 @@
 #include <deque>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#ifdef MOD_DUNGEON_CLEAR
-#include "Integration/ServerApiDungeonClear.h"
-#endif
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/ip/address.hpp>
@@ -102,289 +94,27 @@ namespace ServerApi
                 GetEventBus().QueueSize(), GetCommandQueue().Size(), GetEventBus().DroppedCount());
         }
 
-        std::string BuildAccountJson(uint32_t accountId)
+        std::string BuildModulesResponse()
         {
-            LoginDatabasePreparedStatement* statement =
-                LoginDatabase.GetPreparedStatement(LOGIN_SEL_ACCOUNT_INFO_DETAILED);
-            statement->SetData(0, int32(realm.Id.Realm));
-            statement->SetData(1, accountId);
-            PreparedQueryResult result = LoginDatabase.Query(statement);
-            if (!result)
-                return {};
-
-            Field* fields = result->Fetch();
-            std::string const username = fields[0].Get<std::string>();
-            uint32 const security = fields[1].Get<uint8>();
-            std::string const email = fields[2].Get<std::string>();
-            std::string const lastIp = fields[4].Get<std::string>();
-            std::string const lastLogin = fields[5].Get<std::string>();
-            uint64 const muteTime = fields[6].Get<uint64>();
-            std::string const muteReason = fields[7].Get<std::string>();
-            std::string const muteBy = fields[8].Get<std::string>();
-            uint32 const failedLogins = fields[9].Get<uint32>();
-            uint8 const locked = fields[10].Get<uint8>();
-            uint32 const expansion = fields[12].Get<uint8>();
-            uint32 const flags = fields[13].Get<uint32>();
-            std::string const joinedAt = fields[14].Get<std::string>();
-            uint32 const totalTime = fields[15].Get<uint32>();
-            std::string const lockCountry = fields[16].Get<std::string>();
-            std::string currentIp;
-            uint32 latency = 0;
-            std::vector<PlayerSnapshot> const players = GetPlayerSnapshots();
-            auto const player = std::find_if(players.begin(), players.end(), [accountId](PlayerSnapshot const& item)
-            {
-                return item.accountId == accountId;
-            });
-            if (player != players.end())
-            {
-                currentIp = player->remoteAddress;
-                latency = player->latency;
-            }
-
-            LoginDatabasePreparedStatement* banStatement =
-                LoginDatabase.GetPreparedStatement(LOGIN_SEL_PINFO_BANS);
-            banStatement->SetData(0, accountId);
-            PreparedQueryResult banResult = LoginDatabase.Query(banStatement);
-            bool banned = false;
-            uint64 banUntil = 0;
-            if (banResult)
-            {
-                Field* banFields = banResult->Fetch();
-                banned = true;
-                bool const permanent = banFields[1].Get<bool>();
-                banUntil = permanent ? 0 : banFields[0].Get<uint64>();
-            }
-
-            return Acore::StringFormat(
-                R"({{"id":{},"username":"{}","security":{},"email":"{}","lastIp":"{}",)"
-                R"("currentIp":"{}","lastLogin":"{}","joinedAt":"{}","locked":{},"banned":{},)"
-                R"("banUntil":{},"muteUntil":{},"muteReason":"{}","muteBy":"{}","lockCountry":"{}",)"
-                R"("failedLogins":{},"expansion":{},"flags":{},"totalTime":{},"latency":{},"characters":{}}})",
-                accountId, EscapeJson(username), security, EscapeJson(email), EscapeJson(lastIp),
-                EscapeJson(currentIp), EscapeJson(lastLogin), EscapeJson(joinedAt), locked != 0,
-                banned, banUntil, muteTime, EscapeJson(muteReason), EscapeJson(muteBy),
-                EscapeJson(lockCountry), failedLogins, expansion, flags, totalTime, latency,
-                AccountMgr::GetCharactersCount(accountId));
-        }
-
-        bool ParseAccountIdentifier(std::string const& value, uint32_t& accountId)
-        {
-            if (ParseUnsigned(value, accountId))
-                return accountId != 0;
-            accountId = AccountMgr::GetId(value);
-            return accountId != 0;
-        }
-
-        std::string BuildAccountCharactersJson(uint32_t accountId)
-        {
-            CharacterDatabasePreparedStatement* statement =
-                CharacterDatabase.GetPreparedStatement(CHAR_SEL_ACCOUNT_INFO_CHARS);
-            statement->SetData(0, accountId);
-            PreparedQueryResult result = CharacterDatabase.Query(statement);
             std::string body = R"({"data":[)";
             bool first = true;
-            if (result)
+            for (ModuleDescriptor const& module : GetModuleRegistry().Snapshot())
             {
-                do
+                if (!first)
+                    body += ',';
+                first = false;
+                body += R"({"name":")" + EscapeJson(module.name) +
+                    R"(","version":")" + EscapeJson(module.version) + R"(","capabilities":[)";
+                for (std::size_t index = 0; index < module.capabilities.size(); ++index)
                 {
-                    Field* fields = result->Fetch();
-                    if (!first)
+                    if (index > 0)
                         body += ',';
-                    first = false;
-                    body += Acore::StringFormat(
-                        R"({{"guid":{},"name":"{}","level":{},"race":{},"class":{},"online":{}}})",
-                        fields[0].Get<uint32>(), EscapeJson(fields[1].Get<std::string>()),
-                        fields[2].Get<uint8>(), fields[3].Get<uint8>(), fields[4].Get<uint8>(),
-                        fields[5].Get<bool>());
-                } while (result->NextRow());
+                    body += '"' + EscapeJson(module.capabilities[index]) + '"';
+                }
+                body += "]}";
             }
             body += "]}";
             return body;
-        }
-
-        std::string AccountOperationResult(AccountOpResult result)
-        {
-            switch (result)
-            {
-                case AOR_OK:
-                    return "ok";
-                case AOR_NAME_TOO_LONG:
-                    return "name_too_long";
-                case AOR_PASS_TOO_LONG:
-                    return "password_too_long";
-                case AOR_EMAIL_TOO_LONG:
-                    return "email_too_long";
-                case AOR_NAME_ALREADY_EXIST:
-                    return "name_already_exists";
-                case AOR_NAME_NOT_EXIST:
-                    return "account_not_found";
-                default:
-                    return "database_error";
-            }
-        }
-
-        enum class AccountAction
-        {
-            Password,
-            Email,
-            Username,
-            Lock,
-            Expansion,
-            Flags,
-            Ban,
-            Unban,
-            Mute,
-            Unmute,
-            Delete
-        };
-
-        struct AccountCommand
-        {
-            uint32 accountId = 0;
-            AccountAction action = AccountAction::Password;
-            uint32 value = 0;
-            std::string password;
-            std::string email;
-            std::string username;
-            std::string duration;
-            std::string reason;
-        };
-
-        bool ParseAccountAction(std::string_view value, AccountAction& action)
-        {
-            static constexpr std::array Actions = {
-                std::pair{"password", AccountAction::Password},
-                std::pair{"email", AccountAction::Email},
-                std::pair{"username", AccountAction::Username},
-                std::pair{"lock", AccountAction::Lock},
-                std::pair{"expansion", AccountAction::Expansion},
-                std::pair{"flags", AccountAction::Flags},
-                std::pair{"ban", AccountAction::Ban},
-                std::pair{"unban", AccountAction::Unban},
-                std::pair{"mute", AccountAction::Mute},
-                std::pair{"unmute", AccountAction::Unmute},
-                std::pair{"delete", AccountAction::Delete}
-            };
-
-            auto const entry = std::find_if(Actions.begin(), Actions.end(), [value](auto const& item)
-            {
-                return item.first == value;
-            });
-            if (entry == Actions.end())
-                return false;
-
-            action = entry->second;
-            return true;
-        }
-
-        std::string_view AccountActionName(AccountAction action)
-        {
-            switch (action)
-            {
-                case AccountAction::Password:
-                    return "password";
-                case AccountAction::Email:
-                    return "email";
-                case AccountAction::Username:
-                    return "username";
-                case AccountAction::Lock:
-                    return "lock";
-                case AccountAction::Expansion:
-                    return "expansion";
-                case AccountAction::Flags:
-                    return "flags";
-                case AccountAction::Ban:
-                    return "ban";
-                case AccountAction::Unban:
-                    return "unban";
-                case AccountAction::Mute:
-                    return "mute";
-                case AccountAction::Unmute:
-                    return "unmute";
-                case AccountAction::Delete:
-                    return "delete";
-            }
-            return "unknown";
-        }
-
-        void ExecuteAccountCommand(AccountCommand const& command)
-        {
-            AccountOpResult accountResult = AOR_OK;
-            switch (command.action)
-            {
-                case AccountAction::Password:
-                    accountResult = AccountMgr::ChangePassword(command.accountId, command.password);
-                    break;
-                case AccountAction::Email:
-                    accountResult = AccountMgr::ChangeEmail(command.accountId, command.email);
-                    break;
-                case AccountAction::Username:
-                    accountResult = AccountMgr::ChangeUsername(command.accountId, command.username, command.password);
-                    break;
-                case AccountAction::Lock:
-                {
-                    LoginDatabasePreparedStatement* statement =
-                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_ACCOUNT_LOCK);
-                    statement->SetData(0, command.value != 0);
-                    statement->SetData(1, command.accountId);
-                    LoginDatabase.Execute(statement);
-                    break;
-                }
-                case AccountAction::Expansion:
-                {
-                    LoginDatabasePreparedStatement* statement =
-                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_EXPANSION);
-                    statement->SetData(0, command.value);
-                    statement->SetData(1, command.accountId);
-                    LoginDatabase.Execute(statement);
-                    break;
-                }
-                case AccountAction::Flags:
-                {
-                    LoginDatabasePreparedStatement* statement =
-                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_SET_ACCOUNT_FLAG);
-                    statement->SetData(0, command.value);
-                    statement->SetData(1, command.accountId);
-                    LoginDatabase.Execute(statement);
-                    break;
-                }
-                case AccountAction::Ban:
-                {
-                    std::string accountName;
-                    AccountMgr::GetName(command.accountId, accountName);
-                    sBan->BanAccount(accountName, command.duration,
-                        command.reason.empty() ? "server-api" : command.reason, "server-api");
-                    break;
-                }
-                case AccountAction::Unban:
-                {
-                    std::string accountName;
-                    AccountMgr::GetName(command.accountId, accountName);
-                    sBan->RemoveBanAccount(accountName);
-                    break;
-                }
-                case AccountAction::Mute:
-                case AccountAction::Unmute:
-                {
-                    uint64 muteUntil = 0;
-                    if (command.action == AccountAction::Mute)
-                        muteUntil = GameTime::GetGameTime().count() + TimeStringToSecs(command.duration);
-                    LoginDatabasePreparedStatement* statement =
-                        LoginDatabase.GetPreparedStatement(LOGIN_UPD_MUTE_TIME);
-                    statement->SetData(0, muteUntil);
-                    statement->SetData(1, command.reason);
-                    statement->SetData(2, "server-api");
-                    statement->SetData(3, command.accountId);
-                    LoginDatabase.Execute(statement);
-                    break;
-                }
-                case AccountAction::Delete:
-                    accountResult = AccountMgr::DeleteAccount(command.accountId);
-                    break;
-            }
-
-            LOG_INFO("server-api.accounts", "Account operation={} accountId={} result={}",
-                AccountActionName(command.action), command.accountId, AccountOperationResult(accountResult));
         }
 
         std::string BuildPlayerJson(PlayerSnapshot const& player, bool details)
@@ -469,7 +199,7 @@ namespace ServerApi
             return ParseUnsigned(value, id);
         }
 
-        bool ParsePlayerActionGuid(std::string const& path, std::string_view action, uint64_t& guid)
+        bool ParsePlayerActionGuid(std::string const& path, std::string_view action, uint32_t& guid)
         {
             std::string const prefix = "/api/v1/players/";
             if (path.rfind(prefix, 0) != 0 || path.size() <= prefix.size() + action.size() ||
@@ -497,55 +227,6 @@ namespace ServerApi
                 return false;
             }
         }
-
-        bool ParseBooleanQuery(std::string const& target, std::string_view key, bool& value)
-        {
-            std::string const raw = QueryValue(target, key);
-            if (raw == "true" || raw == "1")
-            {
-                value = true;
-                return true;
-            }
-            if (raw == "false" || raw == "0")
-            {
-                value = false;
-                return true;
-            }
-            return false;
-        }
-
-#ifdef MOD_DUNGEON_CLEAR
-        bool ParseDungeonClearStartRequest(std::string const& target,
-                                           DungeonClearServerApi::StartRequest& request,
-                                           std::string& errorBody)
-        {
-            request.dungeon = QueryValue(target, "dungeon");
-            if (request.dungeon.empty())
-            {
-                errorBody = R"({"error":{"code":"INVALID_DUNGEON"}})";
-                return false;
-            }
-
-            std::string const size = QueryValue(target, "size");
-            std::string const level = QueryValue(target, "level");
-            std::string const seed = QueryValue(target, "seed");
-            if ((!size.empty() && (!ParseUnsigned(size, request.size) || request.size < 2 || request.size > 40)) ||
-                (!level.empty() && !ParseUnsigned(level, request.level)) ||
-                (!seed.empty() && !ParseUnsigned(seed, request.seed)))
-            {
-                errorBody = R"({"error":{"code":"INVALID_RUN_OPTIONS"}})";
-                return false;
-            }
-
-            std::string const heroic = QueryValue(target, "heroic");
-            if (!heroic.empty() && !ParseBooleanQuery(target, "heroic", request.heroic))
-            {
-                errorBody = R"({"error":{"code":"INVALID_HEROIC"}})";
-                return false;
-            }
-            return true;
-        }
-#endif
 
         std::string BuildGroupJson(GroupSnapshot const& group)
         {
@@ -912,6 +593,12 @@ namespace ServerApi
                 else
                     WriteResponse(200, "OK", BuildMetricsResponse());
             }
+            else if (path == "/api/v1/modules")
+            {
+                if (!RequireMethod(method, "GET"))
+                    return;
+                WriteResponse(200, "OK", BuildModulesResponse());
+            }
             else if (path == "/api/v1/groups" || path.rfind("/api/v1/groups/", 0) == 0)
             {
                 if (!RequireMethod(method, "GET"))
@@ -982,229 +669,9 @@ namespace ServerApi
                 WriteResponse(501, "Not Implemented", R"({"error":{"code":"NOT_SUPPORTED","feature":"playerbots"}})");
 #endif
             }
-            else if (path == "/api/v1/accounts" || path.rfind("/api/v1/accounts/", 0) == 0)
-            {
-                std::string const prefix = "/api/v1/accounts/";
-                if (method == "GET" && path.ends_with("/characters"))
-                {
-                    std::string const identifier = path.substr(prefix.size(), path.size() - prefix.size() - 11);
-                    uint32_t accountId = 0;
-                    if (!ParseAccountIdentifier(identifier, accountId))
-                    {
-                        WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT"}})");
-                        return;
-                    }
-                    std::string accountName;
-                    if (!AccountMgr::GetName(accountId, accountName))
-                    {
-                        WriteResponse(404, "Not Found", R"({"error":{"code":"ACCOUNT_NOT_FOUND"}})");
-                        return;
-                    }
-                    WriteResponse(200, "OK", BuildAccountCharactersJson(accountId));
-                    return;
-                }
-
-                if (method == "GET" && path != "/api/v1/accounts")
-                {
-                    std::string const identifier = path.substr(prefix.size());
-                    uint32_t accountId = 0;
-                    if (!ParseAccountIdentifier(identifier, accountId))
-                    {
-                        WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT"}})");
-                        return;
-                    }
-                    std::string const body = BuildAccountJson(accountId);
-                    if (body.empty())
-                        WriteResponse(404, "Not Found", R"({"error":{"code":"ACCOUNT_NOT_FOUND"}})");
-                    else
-                        WriteResponse(200, "OK", body);
-                    return;
-                }
-
-                if (method == "POST" && path == "/api/v1/accounts/create")
-                {
-                    std::string const username = QueryValue(target, "username");
-                    std::string const password = QueryValue(target, "password");
-                    std::string const email = QueryValue(target, "email");
-                    if (username.empty() || password.empty())
-                    {
-                        WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT_CREATE"}})");
-                        return;
-                    }
-                    if (!EnqueueCommand([username, password, email]
-                    {
-                        AccountOpResult const result = sAccountMgr->CreateAccount(username, password, email);
-                        LOG_INFO("server-api.accounts", "Account create '{}' result={}", username,
-                            AccountOperationResult(result));
-                    }))
-                        return;
-                    WriteResponse(202, "Accepted", R"({"status":"queued","operation":"account.create"})");
-                    return;
-                }
-
-                std::string action;
-                std::string identifier;
-                if (path.rfind(prefix, 0) == 0)
-                {
-                    std::string const rest = path.substr(prefix.size());
-                    std::size_t const slash = rest.find('/');
-                    if (slash != std::string::npos)
-                    {
-                        identifier = rest.substr(0, slash);
-                        action = rest.substr(slash + 1);
-                    }
-                }
-                uint32_t accountId = 0;
-                if (method != "POST" || action.empty() || !ParseAccountIdentifier(identifier, accountId))
-                {
-                    WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
-                    return;
-                }
-
-                if (action == "characters")
-                {
-                    WriteResponse(405, "Method Not Allowed", R"({"error":{"code":"METHOD_NOT_ALLOWED"}})");
-                    return;
-                }
-
-                AccountCommand command;
-                command.accountId = accountId;
-                if (!ParseAccountAction(action, command.action))
-                {
-                    WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
-                    return;
-                }
-
-                if (command.action == AccountAction::Delete && QueryValue(target, "confirm") != "DELETE")
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"DELETE_CONFIRMATION_REQUIRED"}})");
-                    return;
-                }
-
-                command.password = QueryValue(target, "password");
-                command.email = QueryValue(target, "email");
-                command.username = QueryValue(target, "username");
-                std::string const value = QueryValue(target, "value");
-                command.duration = QueryValue(target, "duration");
-                command.reason = QueryValue(target, "reason");
-                if (command.action == AccountAction::Password && command.password.empty())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"PASSWORD_REQUIRED"}})");
-                    return;
-                }
-                if (command.action == AccountAction::Email && command.email.empty())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"EMAIL_REQUIRED"}})");
-                    return;
-                }
-                if (command.action == AccountAction::Username &&
-                    (command.username.empty() || command.password.empty()))
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"USERNAME_AND_PASSWORD_REQUIRED"}})");
-                    return;
-                }
-                bool const needsValue = command.action == AccountAction::Lock ||
-                    command.action == AccountAction::Expansion || command.action == AccountAction::Flags;
-                if (needsValue && value.empty())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"VALUE_REQUIRED"}})");
-                    return;
-                }
-                if (needsValue && (!ParseUnsigned(value, command.value) ||
-                    (command.action == AccountAction::Lock && command.value > 1) ||
-                    (command.action == AccountAction::Expansion &&
-                        command.value > EXPANSION_WRATH_OF_THE_LICH_KING)))
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_VALUE"}})");
-                    return;
-                }
-                if ((command.action == AccountAction::Ban || command.action == AccountAction::Mute) &&
-                    command.duration.empty())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"DURATION_REQUIRED"}})");
-                    return;
-                }
-                if ((command.action == AccountAction::Ban || command.action == AccountAction::Mute) &&
-                    TimeStringToSecs(command.duration) == 0)
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_DURATION"}})");
-                    return;
-                }
-
-                if (!EnqueueCommand([command]
-                {
-                    ExecuteAccountCommand(command);
-                }))
-                    return;
-                WriteResponse(202, "Accepted", Acore::StringFormat(
-                    R"({{"status":"queued","operation":"account.{}","accountId":{}}})",
-                    AccountActionName(command.action), accountId));
-                return;
-            }
-#ifdef MOD_DUNGEON_CLEAR
-            else if (method == "GET" && path == "/api/v1/dungeon-clear/dungeons")
-            {
-                WriteResponse(200, "OK", DungeonClearServerApi::CatalogJson());
-            }
-            else if (method == "GET" && path == "/api/v1/dungeon-clear/runs")
-            {
-                WriteResponse(200, "OK", DungeonClearServerApi::RunsJson());
-            }
-            else if (method == "POST" && path == "/api/v1/dungeon-clear/runs/start")
-            {
-                DungeonClearServerApi::StartRequest request;
-                std::string errorBody;
-                if (!ParseDungeonClearStartRequest(target, request, errorBody))
-                {
-                    WriteResponse(400, "Bad Request", errorBody);
-                    return;
-                }
-
-                if (!EnqueueCommand([request]
-                {
-                    std::string message;
-                    std::string runId;
-                    if (!DungeonClearServerApi::Start(request, &message, &runId))
-                        LOG_WARN("server-api.dungeon-clear", "Start rejected: {}", message);
-                }))
-                    return;
-
-                WriteResponse(202, "Accepted", Acore::StringFormat(
-                    R"({{"status":"queued","operation":"dungeon-clear.start","dungeon":"{}"}})",
-                    EscapeJson(request.dungeon)));
-            }
-            else if (method == "POST" && path == "/api/v1/dungeon-clear/runs/stop")
-            {
-                std::string const selector = QueryValue(target, "selector");
-                if (selector.empty())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_SELECTOR"}})");
-                    return;
-                }
-                if (!EnqueueCommand([selector]
-                {
-                    std::string message;
-                    if (!DungeonClearServerApi::Stop(selector, &message))
-                        LOG_WARN("server-api.dungeon-clear", "Stop rejected: {}", message);
-                }))
-                    return;
-                WriteResponse(202, "Accepted", Acore::StringFormat(
-                    R"({{"status":"queued","operation":"dungeon-clear.stop","selector":"{}"}})",
-                    EscapeJson(selector)));
-            }
-#else
-            else if (path == "/api/v1/dungeon-clear/dungeons" ||
-                     path == "/api/v1/dungeon-clear/runs" ||
-                     path == "/api/v1/dungeon-clear/runs/start" ||
-                     path == "/api/v1/dungeon-clear/runs/stop")
-            {
-                WriteResponse(501, "Not Implemented",
-                    R"({"error":{"code":"NOT_SUPPORTED","feature":"mod-dungeon-clear"}})");
-            }
-#endif
             else if (method == "POST" && path.rfind("/api/v1/players/", 0) == 0 && path.ends_with("/teleport"))
             {
-                uint64_t guid = 0;
+                uint32_t guid = 0;
                 uint32_t mapId = 0;
                 float x = 0.0f;
                 float y = 0.0f;
@@ -1221,11 +688,8 @@ namespace ServerApi
 
                 if (!EnqueueCommand([guid, mapId, x, y, z, orientation]
                 {
-                    sWorldSessionMgr->DoForAllOnlinePlayers([guid, mapId, x, y, z, orientation](Player* player)
-                    {
-                        if (player->GetGUID().GetCounter() == guid)
-                            player->TeleportTo(mapId, x, y, z, orientation);
-                    });
+                    if (Player* player = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(guid)))
+                        player->TeleportTo(mapId, x, y, z, orientation);
                 }))
                     return;
 
@@ -1236,7 +700,7 @@ namespace ServerApi
             }
             else if (method == "POST" && path.rfind("/api/v1/players/", 0) == 0 && path.ends_with("/kick"))
             {
-                uint64_t guid = 0;
+                uint32_t guid = 0;
                 if (!ParsePlayerActionGuid(path, "/kick", guid))
                 {
                     WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_GUID"}})");
@@ -1245,11 +709,9 @@ namespace ServerApi
 
                 if (!EnqueueCommand([guid]
                 {
-                    sWorldSessionMgr->DoForAllOnlinePlayers([guid](Player* player)
-                    {
-                        if (player->GetGUID().GetCounter() == guid && player->GetSession())
-                            player->GetSession()->KickPlayer("Server API", false);
-                    });
+                    if (Player* player = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(guid));
+                        player && player->GetSession())
+                        player->GetSession()->KickPlayer("Server API", false);
                 }))
                     return;
 
@@ -1289,6 +751,13 @@ namespace ServerApi
             }
             else
             {
+                std::optional<ModuleApiResponse> const response = GetModuleRegistry().Dispatch({
+                    method, target, path});
+                if (response)
+                {
+                    WriteResponse(response->status, response->reason, response->body, response->headers);
+                    return;
+                }
                 WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
             }
         }

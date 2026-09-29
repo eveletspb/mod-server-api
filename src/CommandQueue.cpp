@@ -6,6 +6,7 @@
 
 #include "Log.h"
 
+#include <chrono>
 #include <exception>
 #include <utility>
 
@@ -21,10 +22,11 @@ namespace ServerApi
         return true;
     }
 
-    std::size_t CommandQueue::Drain(std::size_t maxCommands)
+    std::size_t CommandQueue::Drain(std::size_t maxCommands, std::chrono::milliseconds timeBudget)
     {
+        auto const deadline = std::chrono::steady_clock::now() + timeBudget;
         std::size_t processed = 0;
-        while (processed < maxCommands)
+        while (processed < maxCommands && std::chrono::steady_clock::now() < deadline)
         {
             std::function<void()> command;
             {

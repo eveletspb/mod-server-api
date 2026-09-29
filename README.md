@@ -4,12 +4,11 @@ Custom AzerothCore module exposing a small, local-first HTTP API for the
 `worldserver` runtime.
 
 Implemented now: startup banner, lifecycle management, public `/health` and
-`/ready`, Bearer-protected `/api/v1/server` and `/api/v1/server/metrics`,
-online players, groups, active dungeon/raid instances, a world-thread server
-snapshot, a bounded in-process EventBus, and Bearer-protected
-`/ws/v1/events` with subscriptions and ping/pong. When `mod-dungeon-clear` is
-compiled into the same worldserver, the API also exposes its dungeon/raid test
-run catalog and world-thread-safe run controls.
+`/ready`, optionally Bearer-protected `/api/v1/server` and
+`/api/v1/server/metrics`, online players, groups, active dungeon/raid
+instances, a world-thread server
+snapshot, a bounded in-process EventBus, and optionally Bearer-protected
+`/ws/v1/events` with subscriptions and ping/pong.
 
 ## Supported API
 
@@ -19,8 +18,9 @@ Default address:
 http://127.0.0.1:7878
 ```
 
-The listener is disabled by default. With authentication enabled, versioned
-HTTP endpoints and WebSocket handshakes require:
+The listener is enabled by default on localhost without authentication.
+When Bearer authentication is enabled, versioned HTTP endpoints and WebSocket
+handshakes require:
 
 ```http
 Authorization: Bearer <ServerApi.Auth.ApiKey>
@@ -39,8 +39,8 @@ These endpoints are public and intended for liveness/readiness probes.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/server` | Bearer |
-| `GET` | `/api/v1/server/metrics` | Bearer |
+| `GET` | `/api/v1/server` | Bearer when enabled |
+| `GET` | `/api/v1/server/metrics` | Bearer when enabled |
 
 `/api/v1/server` returns `realmId`, `serverTime`, `uptimeSeconds`,
 `playersOnline` and `botsOnline`.
@@ -67,8 +67,8 @@ included.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/players` | Bearer |
-| `GET` | `/api/v1/players/{guid}` | Bearer |
+| `GET` | `/api/v1/players` | Bearer when enabled |
+| `GET` | `/api/v1/players/{guid}` | Bearer when enabled |
 
 Supported list query parameters:
 
@@ -111,12 +111,21 @@ The detail response additionally contains `health`, `power` and `position`.
 `power` uses the player's active class power type (mana, rage, energy or runic
 power).
 
+### Modules
+
+`GET /api/v1/modules` returns the API capabilities registered by the running
+worldserver modules. The endpoint is intentionally metadata-only: feature
+modules own their domain state and rules, while `mod-server-api` provides the
+transport, authentication, snapshots, commands and events used to expose them.
+
+Each item contains `name`, `version` and a list of capability names.
+
 ### Groups
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/groups` | Bearer |
-| `GET` | `/api/v1/groups/{id}` | Bearer |
+| `GET` | `/api/v1/groups` | Bearer when enabled |
+| `GET` | `/api/v1/groups/{id}` | Bearer when enabled |
 
 Groups are collected from online players on the world thread. A group with no
 online player is not visible in this runtime snapshot. Each item contains
@@ -126,8 +135,8 @@ online player is not visible in this runtime snapshot. Each item contains
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/instances` | Bearer |
-| `GET` | `/api/v1/instances/{instanceId}` | Bearer |
+| `GET` | `/api/v1/instances` | Bearer when enabled |
+| `GET` | `/api/v1/instances/{instanceId}` | Bearer when enabled |
 
 The response contains active dungeon and raid maps only. Each item contains
 `instanceId`, `mapId`, `difficulty` and the current non-GM `players` count.
@@ -137,79 +146,13 @@ Persistent instance-save state and a `startedAt` timestamp are not exposed.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/bots` | Bearer |
+| `GET` | `/api/v1/bots` | Bearer when enabled |
 
 When `mod-playerbots` is compiled into the worldserver, the endpoint returns
 online bot players with the same basic fields as the player list. Without
 `mod-playerbots`, it returns `501 NOT_SUPPORTED`; the server API module still
 builds normally. Bot-specific invite/kick commands remain deferred until the
 playerbots integration is connected to the command queue.
-
-### Dungeon Clear integration
-
-These routes are available when both modules are compiled into the same
-worldserver. The catalog is taken from `mod-dungeon-clear`'s existing `.dc
-test` registry and includes supported dungeons and raids (`mc`, `bwl`, `gruul`).
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| `GET` | `/api/v1/dungeon-clear/dungeons` | Bearer | Supported dungeon and raid tokens |
-| `GET` | `/api/v1/dungeon-clear/runs` | Bearer | Active run status in JSON |
-| `POST` | `/api/v1/dungeon-clear/runs/start?dungeon=<token>` | Bearer | Queue a new run |
-| `POST` | `/api/v1/dungeon-clear/runs/stop?selector=<runId\|token\|all>` | Bearer | Queue cancellation |
-
-Run start accepts optional `heroic=true|false`, `size=2..40`, `level=N` and
-`seed=N`. `size=10` or `size=25` is intended for raid runs; omitting it keeps
-the normal 5-man composition. Start and stop return `202 Accepted` and execute
-on the next world update.
-
-```bash
-curl -H "Authorization: Bearer ${API_KEY}" \
-  http://127.0.0.1:7878/api/v1/dungeon-clear/dungeons
-
-curl -H "Authorization: Bearer ${API_KEY}" \
-  http://127.0.0.1:7878/api/v1/dungeon-clear/runs
-
-curl -i -X POST -H "Authorization: Bearer ${API_KEY}" \
-  'http://127.0.0.1:7878/api/v1/dungeon-clear/runs/start?dungeon=uk&heroic=true'
-
-curl -i -X POST -H "Authorization: Bearer ${API_KEY}" \
-  'http://127.0.0.1:7878/api/v1/dungeon-clear/runs/start?dungeon=mc&size=10&level=60'
-
-curl -i -X POST -H "Authorization: Bearer ${API_KEY}" \
-  'http://127.0.0.1:7878/api/v1/dungeon-clear/runs/stop?selector=all'
-```
-
-Without `mod-dungeon-clear`, these routes return `501 NOT_SUPPORTED`.
-
-### Accounts
-
-Account routes are administrative and require the configured Bearer key. The
-API never returns passwords, SRP data or session keys. Read operations query
-the core's prepared account/character statements; write operations are queued
-to the world thread.
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/api/v1/accounts/{id-or-name}` | Account details, status and counters |
-| `GET` | `/api/v1/accounts/{id-or-name}/characters` | Account characters |
-| `POST` | `/api/v1/accounts/create?username=&password=&email=` | Create account |
-| `POST` | `/api/v1/accounts/{id}/password?password=` | Change password |
-| `POST` | `/api/v1/accounts/{id}/email?email=` | Change email |
-| `POST` | `/api/v1/accounts/{id}/username?username=&password=` | Change username |
-| `POST` | `/api/v1/accounts/{id}/lock?value=0\|1` | Lock or unlock |
-| `POST` | `/api/v1/accounts/{id}/expansion?value=N` | Set expansion level |
-| `POST` | `/api/v1/accounts/{id}/flags?value=N` | Set account flags |
-| `POST` | `/api/v1/accounts/{id}/ban?duration=7d&reason=` | Ban account |
-| `POST` | `/api/v1/accounts/{id}/unban` | Remove account ban |
-| `POST` | `/api/v1/accounts/{id}/mute?duration=1h&reason=` | Mute account |
-| `POST` | `/api/v1/accounts/{id}/unmute` | Remove mute |
-| `POST` | `/api/v1/accounts/{id}/delete?confirm=DELETE` | Delete account and characters |
-
-All write operations return `202 Accepted`. Account deletion is intentionally
-guarded by the exact `confirm=DELETE` parameter.
-`lock` accepts only `0` or `1`, expansion accepts the WotLK range `0..2`, and
-invalid numeric values or durations are rejected before a command is queued.
 
 ### Commands
 
@@ -223,10 +166,10 @@ curl -i -X POST \
   http://127.0.0.1:7878/api/v1/players/123/kick
 ```
 
-The command queue is bounded. If it is full, the API returns
-`503 COMMAND_QUEUE_FULL`. This command is intentionally not included in the
-automatic contract test because it changes server state and can disconnect a
-real player.
+The command queue is bounded and receives at most 2 ms of execution time per
+world update. If it is full, the API returns `503 COMMAND_QUEUE_FULL`. This
+command is intentionally not included in the automatic contract test because
+it changes server state and can disconnect a real player.
 
 `POST /api/v1/players/{guid}/teleport` uses the same queue and requires
 `mapId`, `x`, `y`, `z` and `orientation` query parameters:
@@ -245,7 +188,8 @@ Endpoint:
 ws://127.0.0.1:7878/ws/v1/events
 ```
 
-The WebSocket handshake requires the same Bearer header. After connecting,
+When authentication is enabled, the WebSocket handshake requires the same
+Bearer header. After connecting,
 send a compact JSON subscription message:
 
 ```json
@@ -317,7 +261,7 @@ aggregator.
 | Status | Meaning |
 |---:|---|
 | `400` | Invalid request or command parameters |
-| `401` | Missing or invalid Bearer token |
+| `401` | Missing or invalid Bearer token when authentication is enabled |
 | `404` | Unknown endpoint or player not found |
 | `405` | Known endpoint called with an unsupported method |
 | `413` | Request exceeds `ServerApi.MaxRequestBytes` |
@@ -426,6 +370,13 @@ ServerApi.WebSocket.MaxFrameBytes = 1048576
 ServerApi.WebSocket.MaxSubscriptions = 100
 ServerApi.WebSocket.MaxQueue = 100
 ServerApi.WebSocket.MaxClients = 50
+ServerApi.Auth.Enable = 0
+ServerApi.Auth.ApiKey = ""
+```
+
+To enable Bearer authentication:
+
+```ini
 ServerApi.Auth.Enable = 1
 ServerApi.Auth.ApiKey = "test-secret-key"
 ```
@@ -439,10 +390,12 @@ ServerApi.Auth.Enable = 0
 ServerApi.Auth.ApiKey = ""
 ```
 
-With `Auth.Enable = 0`, REST and WebSocket endpoints accept requests without a
-Bearer header. Non-local bind addresses are still rejected without enabled
-Bearer authentication and a non-empty API key. Do not expose an unauthenticated
-listener outside localhost.
+With `Auth.Enable = 0` (the default), REST and WebSocket endpoints accept
+requests without a Bearer header. Non-local bind addresses are still rejected
+without enabled Bearer authentication and a non-empty API key. Do not expose an
+unauthenticated listener outside localhost. On startup, the module logs the effective listener,
+authentication mode, limits and sampling intervals. `ServerApi.Auth.ApiKey` is
+never included in the startup summary.
 
 ## Testing
 

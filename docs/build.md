@@ -22,11 +22,13 @@ cmake --install build
 устанавливает module config в каталог конфигурации выбранного
 `CMAKE_INSTALL_PREFIX`.
 
-После конфигурации проверьте, что в выводе CMake модуль `mod-server-api` не отключён. Для первого запуска API оставьте:
+После конфигурации проверьте, что в выводе CMake модуль `mod-server-api` не отключён.
+По умолчанию API уже включён на localhost и работает без аутентификации:
 
 ```ini
-ServerApi.Enable = 0
+ServerApi.Enable = 1
 ServerApi.BindAddress = "127.0.0.1"
+ServerApi.Auth.Enable = 0
 ServerApi.Port = 7878
 ```
 
@@ -46,12 +48,11 @@ curl -i -H 'Authorization: Bearer change-me' http://127.0.0.1:7878/api/v1/server
 {"status":"ready"}
 ```
 
-Перед включением API по умолчанию задайте непустой `ServerApi.Auth.ApiKey` и
-используйте его в заголовке `Authorization: Bearer <key>`. Для доверенного
-локального deployment можно установить `ServerApi.Auth.Enable = 0`; тогда
-versioned API и WebSocket работают без токена. Для non-local bind auth остаётся
-обязательным. Не коммитьте production key в репозиторий. При изменении bind
-или порта требуется перезапуск worldserver.
+Чтобы включить аутентификацию, задайте `ServerApi.Auth.Enable = 1` и непустой
+`ServerApi.Auth.ApiKey`, затем передавайте ключ в заголовке
+`Authorization: Bearer <key>`. Для non-local bind auth обязателен.
+Не коммитьте production key в репозиторий. При изменении bind или порта
+требуется перезапуск worldserver.
 
 Smoke-тест всех endpoints находится в `scripts/test-api.sh`:
 

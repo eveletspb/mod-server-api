@@ -5,6 +5,7 @@
 #include "ServerApi/ApiServer.h"
 #include "ServerApi/CommandQueue.h"
 #include "ServerApi/EventBus.h"
+#include "ServerApi/ModuleRegistry.h"
 #include "ServerApi/ServerApiConfig.h"
 #include "ServerApi/ServerSnapshot.h"
 
@@ -13,8 +14,10 @@
 #include "ScriptMgr.h"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace
@@ -75,13 +78,25 @@ namespace
         };
     }
 
-    void LogStartupBanner(bool enabled)
+    void LogStartupBanner(ServerApi::Config const& config)
     {
         LOG_INFO("server.loading", "+--------------------------------------+");
         LOG_INFO("server.loading", "|          MOD-SERVER-API              |");
         LOG_INFO("server.loading", "|   AzerothCore runtime bridge v0.1   |");
         LOG_INFO("server.loading", "+--------------------------------------+");
-        LOG_INFO("server.loading", ">> Status: {}", enabled ? "enabled" : "disabled by configuration");
+        LOG_INFO("server.loading", ">> Status: {}", config.enabled ? "enabled" : "disabled by configuration");
+        LOG_INFO("server.loading", ">> Listener: {}:{}", config.bindAddress, config.port);
+        LOG_INFO("server.loading", ">> Authentication: {}", config.authEnabled ? "Bearer enabled" : "disabled");
+        LOG_INFO("server.loading", ">> HTTP limits: request={} bytes, rate={}/s (0 = unlimited)",
+            config.maxRequestBytes, config.maxRequestsPerSecond);
+        LOG_INFO("server.loading", ">> WebSocket: {}", config.webSocketEnabled ? "enabled" : "disabled");
+        if (config.webSocketEnabled)
+            LOG_INFO("server.loading", ">> WebSocket limits: frame={} bytes, subscriptions={}, queue={}, clients={}",
+                config.maxWebSocketFrameBytes, config.maxWebSocketSubscriptions, config.maxWebSocketQueue,
+                config.maxWebSocketClients);
+
+        LOG_INFO("server.loading", ">> Sampling: position={} ms, combat={} ms",
+            config.positionUpdatesIntervalMs, config.combatSnapshotIntervalMs);
     }
 
     class ServerApiWorldScript : public WorldScript
@@ -115,15 +130,19 @@ namespace
 
         void OnStartup() override
         {
-            LogStartupBanner(_config.enabled);
+            LogStartupBanner(_config);
 
             if (!_config.enabled)
                 return;
+
+            ServerApi::GetModuleRegistry().Register({
+                "server-api", "0.1.0", {"server", "runtime", "commands", "events"}});
 
             ServerApi::GetEventBus().Start();
             if (!_server.Start(_config))
             {
                 ServerApi::GetEventBus().Stop();
+                ServerApi::GetModuleRegistry().Unregister("server-api");
                 return;
             }
 
@@ -141,16 +160,16 @@ namespace
             if (!_started)
                 return;
 
-            ServerApi::GetCommandQueue().Drain(100);
+            ServerApi::GetCommandQueue().Drain(100, std::chrono::milliseconds(2));
             _snapshotTimer += diff;
             _combatTimer += diff;
             if (_snapshotTimer < _config.positionUpdatesIntervalMs)
                 return;
 
             _snapshotTimer = 0;
-            std::vector<ServerApi::PlayerSnapshot> const previousPlayers = _players;
-            std::vector<ServerApi::GroupSnapshot> const previousGroups = _groups;
-            std::vector<ServerApi::InstanceSnapshot> const previousInstances = _instances;
+            std::vector<ServerApi::PlayerSnapshot> const previousPlayers = std::move(_players);
+            std::vector<ServerApi::GroupSnapshot> const previousGroups = std::move(_groups);
+            std::vector<ServerApi::InstanceSnapshot> const previousInstances = std::move(_instances);
             ServerApi::RefreshServerSnapshot();
             _players = ServerApi::GetPlayerSnapshots();
             _groups = ServerApi::GetGroupSnapshots();
@@ -177,6 +196,7 @@ namespace
             _server.Stop();
             ServerApi::GetCommandQueue().Clear();
             ServerApi::GetEventBus().Stop();
+            ServerApi::GetModuleRegistry().Unregister("server-api");
             _started = false;
             _groups.clear();
             _instances.clear();
@@ -193,67 +213,71 @@ namespace
             std::vector<ServerApi::InstanceSnapshot> const& previousInstances,
             std::vector<ServerApi::InstanceSnapshot> const& instances)
         {
+            std::unordered_map<uint64_t, ServerApi::PlayerSnapshot const*> previousPlayersByGuid;
+            previousPlayersByGuid.reserve(previousPlayers.size());
+            for (ServerApi::PlayerSnapshot const& player : previousPlayers)
+                previousPlayersByGuid.emplace(player.guid, &player);
+
+            std::unordered_map<uint64_t, ServerApi::GroupSnapshot const*> previousGroupsById;
+            previousGroupsById.reserve(previousGroups.size());
+            for (ServerApi::GroupSnapshot const& group : previousGroups)
+                previousGroupsById.emplace(group.id, &group);
+
+            std::unordered_map<uint64_t, ServerApi::GroupSnapshot const*> groupsById;
+            groupsById.reserve(groups.size());
+            for (ServerApi::GroupSnapshot const& group : groups)
+                groupsById.emplace(group.id, &group);
+
+            std::unordered_map<uint32_t, ServerApi::InstanceSnapshot const*> previousInstancesById;
+            previousInstancesById.reserve(previousInstances.size());
+            for (ServerApi::InstanceSnapshot const& instance : previousInstances)
+                previousInstancesById.emplace(instance.instanceId, &instance);
+
+            std::unordered_map<uint32_t, ServerApi::InstanceSnapshot const*> instancesById;
+            instancesById.reserve(instances.size());
+            for (ServerApi::InstanceSnapshot const& instance : instances)
+                instancesById.emplace(instance.instanceId, &instance);
+
             for (ServerApi::PlayerSnapshot const& player : players)
             {
-                auto const previous = std::find_if(previousPlayers.begin(), previousPlayers.end(),
-                    [&player](ServerApi::PlayerSnapshot const& item)
-                {
-                    return item.guid == player.guid;
-                });
-                if (previous != previousPlayers.end() &&
-                    (previous->mapId != player.mapId || previous->x != player.x || previous->y != player.y ||
-                     previous->z != player.z || previous->orientation != player.orientation))
+                auto const previous = previousPlayersByGuid.find(player.guid);
+                if (previous != previousPlayersByGuid.end() &&
+                    (previous->second->mapId != player.mapId || previous->second->x != player.x ||
+                     previous->second->y != player.y || previous->second->z != player.z ||
+                     previous->second->orientation != player.orientation))
                     ServerApi::Publish("player.position", BuildPlayerPositionEventData(player),
                         ServerApi::EventPriority::Telemetry);
             }
 
             for (ServerApi::GroupSnapshot const& group : groups)
             {
-                auto const previous = std::find_if(previousGroups.begin(), previousGroups.end(),
-                    [&group](ServerApi::GroupSnapshot const& item)
-                {
-                    return item.id == group.id;
-                });
-                if (previous == previousGroups.end())
+                auto const previous = previousGroupsById.find(group.id);
+                if (previous == previousGroupsById.end())
                     ServerApi::Publish("group.created", BuildGroupEventData(group));
-                else if (previous->leaderGuid != group.leaderGuid || previous->raid != group.raid ||
-                    previous->memberGuids != group.memberGuids)
+                else if (previous->second->leaderGuid != group.leaderGuid || previous->second->raid != group.raid ||
+                    previous->second->memberGuids != group.memberGuids)
                     ServerApi::Publish("group.updated", BuildGroupEventData(group));
             }
 
             for (ServerApi::GroupSnapshot const& group : previousGroups)
             {
-                auto const current = std::find_if(groups.begin(), groups.end(),
-                    [&group](ServerApi::GroupSnapshot const& item)
-                {
-                    return item.id == group.id;
-                });
-                if (current == groups.end())
+                if (!groupsById.contains(group.id))
                     ServerApi::Publish("group.disbanded", BuildGroupEventData(group));
             }
 
             for (ServerApi::InstanceSnapshot const& instance : instances)
             {
-                auto const previous = std::find_if(previousInstances.begin(), previousInstances.end(),
-                    [&instance](ServerApi::InstanceSnapshot const& item)
-                {
-                    return item.instanceId == instance.instanceId;
-                });
-                if (previous == previousInstances.end())
+                auto const previous = previousInstancesById.find(instance.instanceId);
+                if (previous == previousInstancesById.end())
                     ServerApi::Publish("instance.started", BuildInstanceEventData(instance));
-                else if (previous->mapId != instance.mapId || previous->difficulty != instance.difficulty ||
-                    previous->players != instance.players)
+                else if (previous->second->mapId != instance.mapId ||
+                    previous->second->difficulty != instance.difficulty || previous->second->players != instance.players)
                     ServerApi::Publish("instance.updated", BuildInstanceEventData(instance));
             }
 
             for (ServerApi::InstanceSnapshot const& instance : previousInstances)
             {
-                auto const current = std::find_if(instances.begin(), instances.end(),
-                    [&instance](ServerApi::InstanceSnapshot const& item)
-                {
-                    return item.instanceId == instance.instanceId;
-                });
-                if (current == instances.end())
+                if (!instancesById.contains(instance.instanceId))
                     ServerApi::Publish("instance.stopped", BuildInstanceEventData(instance));
             }
         }

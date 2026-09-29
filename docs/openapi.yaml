@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: mod-server-api
   version: 0.1.0
-  description: Runtime HTTP API for an AzerothCore WotLK worldserver.
+  description: Runtime HTTP API for an AzerothCore WotLK worldserver. Bearer authentication is optional and disabled by default on localhost; authorization scopes are not implemented.
 servers:
   - url: http://127.0.0.1:7878
     description: Default local listener
@@ -13,8 +13,6 @@ tags:
   - name: Groups
   - name: Instances
   - name: Bots
-  - name: Dungeon Clear
-  - name: Accounts
   - name: Commands
 paths:
   /health:
@@ -40,7 +38,7 @@ paths:
   /api/v1/server:
     get:
       tags: [Server]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Runtime server snapshot
       responses:
         '200':
@@ -52,7 +50,7 @@ paths:
   /api/v1/server/metrics:
     get:
       tags: [Server]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Runtime server metrics
       responses:
         '200':
@@ -61,10 +59,28 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ServerMetrics'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/modules:
+    get:
+      tags: [Server]
+      security: [{bearerAuth: []}, {}]
+      summary: List registered API modules and capabilities
+      responses:
+        '200':
+          description: Registered module capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/ModuleDescriptor'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
   /api/v1/players:
     get:
       tags: [Players]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: List online players
       parameters:
         - {$ref: '#/components/parameters/Name'}
@@ -87,7 +103,7 @@ paths:
   /api/v1/players/{guid}:
     get:
       tags: [Players]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Get one online player
       parameters: [{$ref: '#/components/parameters/Guid'}]
       responses:
@@ -102,7 +118,7 @@ paths:
   /api/v1/groups:
     get:
       tags: [Groups]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: List groups visible through online players
       responses:
         '200':
@@ -120,7 +136,7 @@ paths:
   /api/v1/groups/{id}:
     get:
       tags: [Groups]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Get one group
       parameters: [{$ref: '#/components/parameters/ResourceId'}]
       responses:
@@ -135,7 +151,7 @@ paths:
   /api/v1/instances:
     get:
       tags: [Instances]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: List active dungeon and raid instances
       responses:
         '200':
@@ -153,7 +169,7 @@ paths:
   /api/v1/instances/{instanceId}:
     get:
       tags: [Instances]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Get one active instance
       parameters: [{$ref: '#/components/parameters/InstanceId'}]
       responses:
@@ -168,7 +184,7 @@ paths:
   /api/v1/bots:
     get:
       tags: [Bots]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: List online playerbots
       description: Returns 501 when mod-playerbots is not compiled into worldserver.
       responses:
@@ -185,131 +201,10 @@ paths:
                     items: {$ref: '#/components/schemas/Player'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '501': {$ref: '#/components/responses/NotSupported'}
-  /api/v1/accounts/{account}:
-    get:
-      tags: [Accounts]
-      security: [{bearerAuth: []}]
-      summary: Get administrative account details
-      parameters:
-        - {name: account, in: path, required: true, schema: {type: string}}
-      responses:
-        '200': {description: Account details, content: {application/json: {schema: {type: object}}}}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {$ref: '#/components/responses/NotFound'}
-  /api/v1/accounts/{account}/characters:
-    get:
-      tags: [Accounts]
-      security: [{bearerAuth: []}]
-      summary: List account characters
-      parameters:
-        - {name: account, in: path, required: true, schema: {type: string}}
-      responses:
-        '200': {description: Account characters, content: {application/json: {schema: {type: object}}}}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {$ref: '#/components/responses/NotFound'}
-  /api/v1/accounts/create:
-    post:
-      tags: [Accounts]
-      security: [{bearerAuth: []}]
-      summary: Queue account creation
-      parameters:
-        - {name: username, in: query, required: true, schema: {type: string}}
-        - {name: password, in: query, required: true, schema: {type: string, format: password}}
-        - {name: email, in: query, required: false, schema: {type: string, format: email}}
-      responses:
-        '202':
-          description: Queued
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/QueuedCommand'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '503': {$ref: '#/components/responses/QueueFull'}
-  /api/v1/dungeon-clear/dungeons:
-    get:
-      tags: [Dungeon Clear]
-      security: [{bearerAuth: []}]
-      summary: List supported dungeon-clear dungeons and raids
-      responses:
-        '200':
-          description: Dungeon-clear catalog
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      required: [token, name, mapId, recommendedLevel, heroic, raid]
-                      properties:
-                        token: {type: string}
-                        name: {type: string}
-                        mapId: {type: integer, format: int32}
-                        recommendedLevel: {type: integer, format: int32}
-                        heroic: {type: boolean}
-                        heroicLevel: {type: integer, format: int32}
-                        raid: {type: boolean}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '501': {$ref: '#/components/responses/NotSupported'}
-  /api/v1/dungeon-clear/runs:
-    get:
-      tags: [Dungeon Clear]
-      security: [{bearerAuth: []}]
-      summary: Get active dungeon-clear run status
-      responses:
-        '200':
-          description: Live run snapshot
-          content:
-            application/json:
-              schema: {type: object}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '501': {$ref: '#/components/responses/NotSupported'}
-  /api/v1/dungeon-clear/runs/start:
-    post:
-      tags: [Dungeon Clear]
-      security: [{bearerAuth: []}]
-      summary: Queue a dungeon or raid test run
-      parameters:
-        - {name: dungeon, in: query, required: true, schema: {type: string}}
-        - {name: heroic, in: query, required: false, schema: {type: boolean}}
-        - {name: size, in: query, required: false, schema: {type: integer, minimum: 2, maximum: 40}}
-        - {name: level, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 80}}
-        - {name: seed, in: query, required: false, schema: {type: integer, minimum: 0}}
-      responses:
-        '202':
-          description: World-thread command queued
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/QueuedCommand'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '501': {$ref: '#/components/responses/NotSupported'}
-        '503': {$ref: '#/components/responses/QueueFull'}
-  /api/v1/dungeon-clear/runs/stop:
-    post:
-      tags: [Dungeon Clear]
-      security: [{bearerAuth: []}]
-      summary: Queue cancellation of an active run
-      parameters:
-        - {name: selector, in: query, required: true, schema: {type: string, example: all}}
-      responses:
-        '202':
-          description: World-thread command queued
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/QueuedCommand'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '501': {$ref: '#/components/responses/NotSupported'}
-        '503': {$ref: '#/components/responses/QueueFull'}
   /api/v1/players/{guid}/kick:
     post:
       tags: [Commands]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Queue a player kick
       description: The command is executed on the next world update.
       parameters: [{$ref: '#/components/parameters/Guid'}]
@@ -325,7 +220,7 @@ paths:
   /api/v1/players/{guid}/teleport:
     post:
       tags: [Commands]
-      security: [{bearerAuth: []}]
+      security: [{bearerAuth: []}, {}]
       summary: Queue a player teleport
       parameters:
         - {$ref: '#/components/parameters/Guid'}
@@ -348,7 +243,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Optional when ServerApi.Auth.Enable is 0 on localhost.
+      description: Optional; disabled by default on localhost and enabled with ServerApi.Auth.Enable.
   parameters:
     Guid:
       name: guid
@@ -387,7 +282,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
     Unauthorized:
-      description: Missing or invalid Bearer token
+      description: Missing or invalid Bearer token when authentication is enabled
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -445,6 +340,15 @@ components:
         eventQueue: {type: integer, format: int64}
         commandQueue: {type: integer, format: int64}
         droppedEvents: {type: integer, format: int64}
+    ModuleDescriptor:
+      type: object
+      required: [name, version, capabilities]
+      properties:
+        name: {type: string}
+        version: {type: string}
+        capabilities:
+          type: array
+          items: {type: string}
     Player:
       type: object
       required: [guid, name, level, class, race, mapId, zoneId, online]
@@ -490,4 +394,3 @@ components:
         status: {type: string, enum: [queued]}
         operation: {type: string}
         guid: {type: integer, format: int64}
-        accountId: {type: integer, format: int32}

@@ -67,7 +67,8 @@ namespace ServerApi
         static bool Matches(std::string const& pattern, std::string const& eventType);
 
         std::size_t _maxQueueSize;
-        mutable std::mutex _mutex;
+        mutable std::mutex _queueMutex;
+        mutable std::mutex _subscriptionsMutex;
         std::condition_variable _condition;
         std::deque<ApiEvent> _queue;
         std::vector<Subscription> _subscriptions;

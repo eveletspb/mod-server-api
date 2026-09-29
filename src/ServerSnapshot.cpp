@@ -11,6 +11,7 @@
 #include "Realm.h"
 #include "WorldSessionMgr.h"
 
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 
@@ -20,9 +21,9 @@ namespace ServerApi
     {
         std::mutex SnapshotMutex;
         ServerSnapshot Snapshot;
-        std::vector<PlayerSnapshot> Players;
-        std::vector<GroupSnapshot> Groups;
-        std::vector<InstanceSnapshot> Instances;
+        auto Players = std::make_shared<std::vector<PlayerSnapshot> const>();
+        auto Groups = std::make_shared<std::vector<GroupSnapshot> const>();
+        auto Instances = std::make_shared<std::vector<InstanceSnapshot> const>();
     }
 
     ServerSnapshot GetServerSnapshot()
@@ -33,20 +34,32 @@ namespace ServerApi
 
     std::vector<PlayerSnapshot> GetPlayerSnapshots()
     {
-        std::lock_guard lock(SnapshotMutex);
-        return Players;
+        std::shared_ptr<std::vector<PlayerSnapshot> const> players;
+        {
+            std::lock_guard lock(SnapshotMutex);
+            players = Players;
+        }
+        return *players;
     }
 
     std::vector<GroupSnapshot> GetGroupSnapshots()
     {
-        std::lock_guard lock(SnapshotMutex);
-        return Groups;
+        std::shared_ptr<std::vector<GroupSnapshot> const> groups;
+        {
+            std::lock_guard lock(SnapshotMutex);
+            groups = Groups;
+        }
+        return *groups;
     }
 
     std::vector<InstanceSnapshot> GetInstanceSnapshots()
     {
-        std::lock_guard lock(SnapshotMutex);
-        return Instances;
+        std::shared_ptr<std::vector<InstanceSnapshot> const> instances;
+        {
+            std::lock_guard lock(SnapshotMutex);
+            instances = Instances;
+        }
+        return *instances;
     }
 
     void RefreshServerSnapshot()
@@ -57,16 +70,26 @@ namespace ServerApi
         updated.uptimeSeconds = static_cast<uint64_t>(GameTime::GetUptime().count());
         updated.playersOnline = sWorldSessionMgr->GetPlayerCount();
 
-        sMapMgr->DoForAllMaps([&updated](Map*)
+        std::vector<InstanceSnapshot> updatedInstances;
+        sMapMgr->DoForAllMaps([&updated, &updatedInstances](Map* map)
         {
             ++updated.activeMaps;
-        });
+            if (map->GetInstanceId() == 0 || !map->Instanceable())
+                return;
 
-        uint32_t dungeons = 0;
-        uint32_t battlegrounds = 0;
-        uint32_t arenas = 0;
-        sMapMgr->GetNumInstances(dungeons, battlegrounds, arenas);
-        updated.activeInstances = dungeons + battlegrounds + arenas;
+            if (map->IsDungeon())
+            {
+                ++updated.activeInstances;
+                updatedInstances.push_back({
+                    map->GetInstanceId(),
+                    map->GetId(),
+                    static_cast<uint32_t>(map->GetDifficulty()),
+                    map->GetPlayersCountExceptGMs()
+                });
+            }
+            else if (map->IsBattleground() || map->IsBattleArena())
+                ++updated.activeInstances;
+        });
 
         std::vector<PlayerSnapshot> updatedPlayers;
         std::vector<GroupSnapshot> updatedGroups;
@@ -88,12 +111,7 @@ namespace ServerApi
             playerSnapshot.power = player->GetPower(powerType);
             playerSnapshot.maxPower = player->GetMaxPower(powerType);
             if (WorldSession* session = player->GetSession())
-            {
-                playerSnapshot.accountId = session->GetAccountId();
-                playerSnapshot.remoteAddress = session->GetRemoteAddress();
-                playerSnapshot.latency = session->GetLatency();
                 playerSnapshot.bot = session->IsBot();
-            }
             if (playerSnapshot.bot)
                 ++updated.botsOnline;
             playerSnapshot.inCombat = player->IsInCombat();
@@ -118,24 +136,21 @@ namespace ServerApi
             updatedGroups.push_back(std::move(groupSnapshot));
         });
 
-        std::vector<InstanceSnapshot> updatedInstances;
-        sMapMgr->DoForAllMaps([&updatedInstances](Map* map)
+        auto nextPlayers = std::make_shared<std::vector<PlayerSnapshot> const>(std::move(updatedPlayers));
+        auto nextGroups = std::make_shared<std::vector<GroupSnapshot> const>(std::move(updatedGroups));
+        auto nextInstances = std::make_shared<std::vector<InstanceSnapshot> const>(std::move(updatedInstances));
+        std::shared_ptr<std::vector<PlayerSnapshot> const> oldPlayers;
+        std::shared_ptr<std::vector<GroupSnapshot> const> oldGroups;
+        std::shared_ptr<std::vector<InstanceSnapshot> const> oldInstances;
         {
-            if (map->GetInstanceId() == 0 || !map->Instanceable() || !map->IsDungeon())
-                return;
-
-            updatedInstances.push_back({
-                map->GetInstanceId(),
-                map->GetId(),
-                static_cast<uint32_t>(map->GetDifficulty()),
-                map->GetPlayersCountExceptGMs()
-            });
-        });
-
-        std::lock_guard lock(SnapshotMutex);
-        Snapshot = updated;
-        Players = std::move(updatedPlayers);
-        Groups = std::move(updatedGroups);
-        Instances = std::move(updatedInstances);
+            std::lock_guard lock(SnapshotMutex);
+            Snapshot = updated;
+            oldPlayers = std::move(Players);
+            oldGroups = std::move(Groups);
+            oldInstances = std::move(Instances);
+            Players = std::move(nextPlayers);
+            Groups = std::move(nextGroups);
+            Instances = std::move(nextInstances);
+        }
     }
 }

@@ -5,6 +5,7 @@
 #ifndef SERVER_API_COMMAND_QUEUE_H_
 #define SERVER_API_COMMAND_QUEUE_H_
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <mutex>
@@ -18,7 +19,7 @@ namespace ServerApi
         explicit CommandQueue(std::size_t maxSize = 1000) : _maxSize(maxSize) { }
 
         bool Enqueue(std::function<void()> command);
-        std::size_t Drain(std::size_t maxCommands);
+        std::size_t Drain(std::size_t maxCommands, std::chrono::milliseconds timeBudget);
         void Clear();
         std::size_t Size() const;
 

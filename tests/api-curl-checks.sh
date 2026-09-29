@@ -46,45 +46,33 @@ curl -i "${BASE_URL}/api/v1/instances/1"
 echo "===== 12. Playerbots list ====="
 curl -i "${BASE_URL}/api/v1/bots"
 
-echo "===== 13. Dungeon Clear catalog; expected 200 with mod-dungeon-clear or 501 without it ====="
-curl -i "${BASE_URL}/api/v1/dungeon-clear/dungeons"
-
-echo "===== 14. Dungeon Clear active runs; expected 200 with mod-dungeon-clear or 501 without it ====="
-curl -i "${BASE_URL}/api/v1/dungeon-clear/runs"
-
-echo "===== 15. Invalid player map filter; expected 400 ====="
+echo "===== 13. Invalid player map filter; expected 400 ====="
 curl -i "${BASE_URL}/api/v1/players?mapId=invalid"
 
-echo "===== 16. Account details; replace 1 with an account ID or name ====="
+echo "===== 14. Removed account API; expected 404 ====="
 curl -i "${BASE_URL}/api/v1/accounts/1"
 
-echo "===== 17. Account characters; replace 1 with an account ID or name ====="
-curl -i "${BASE_URL}/api/v1/accounts/1/characters"
-
-echo "===== 18. Invalid player limit; expected 400 ====="
+echo "===== 15. Invalid player limit; expected 400 ====="
 curl -i "${BASE_URL}/api/v1/players?limit=0"
 
-echo "===== 18. Invalid group ID; expected 400 ====="
+echo "===== 16. Invalid group ID; expected 400 ====="
 curl -i "${BASE_URL}/api/v1/groups/not-a-number"
 
-echo "===== 19. Missing instance; expected 404 ====="
+echo "===== 17. Missing instance; expected 404 ====="
 curl -i "${BASE_URL}/api/v1/instances/999999999"
 
-echo "===== 20. Invalid dungeon-clear start; safe, no state change, expected 400 ====="
-curl -i -X POST "${BASE_URL}/api/v1/dungeon-clear/runs/start"
-
-echo "===== 21. Invalid kick command; safe, no state change, expected 400 ====="
+echo "===== 18. Invalid kick command; safe, no state change, expected 400 ====="
 curl -i -X POST "${BASE_URL}/api/v1/players/not-a-guid/kick"
 
-echo "===== 22. Invalid teleport command; safe, no state change, expected 400 ====="
+echo "===== 19. Invalid teleport command; safe, no state change, expected 400 ====="
 curl -i -X POST \
   "${BASE_URL}/api/v1/players/1/teleport?mapId=bad&x=0&y=0&z=0&orientation=0"
 
 if [[ -n "${API_KEY}" ]]; then
-    echo "===== 23. Authenticated server request ====="
+    echo "===== 20. Authenticated server request ====="
     curl -i -H "${AUTH_HEADER}" "${BASE_URL}/api/v1/server"
 
-    echo "===== 24. Authenticated WebSocket upgrade request ====="
+    echo "===== 21. Authenticated WebSocket upgrade request ====="
     curl -i --http1.1 --max-time 3 \
       -H "Connection: Upgrade" \
       -H "Upgrade: websocket" \
@@ -93,7 +81,7 @@ if [[ -n "${API_KEY}" ]]; then
       -H "${AUTH_HEADER}" \
       "${BASE_URL}/ws/v1/events"
 else
-    echo "===== 23-24. Authenticated checks skipped ====="
+    echo "===== 20-21. Authenticated checks skipped ====="
     echo "Set SERVER_API_KEY when ServerApi.Auth.Enable = 1."
 fi
 
