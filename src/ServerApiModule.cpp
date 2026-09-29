@@ -82,7 +82,7 @@ namespace
     {
         LOG_INFO("server.loading", "+--------------------------------------+");
         LOG_INFO("server.loading", "|          MOD-SERVER-API              |");
-        LOG_INFO("server.loading", "|   AzerothCore runtime bridge v0.1   |");
+        LOG_INFO("server.loading", "|   AzerothCore runtime bridge v1.0.0 |");
         LOG_INFO("server.loading", "+--------------------------------------+");
         LOG_INFO("server.loading", ">> Status: {}", config.enabled ? "enabled" : "disabled by configuration");
         LOG_INFO("server.loading", ">> Listener: {}:{}", config.bindAddress, config.port);
@@ -136,7 +136,7 @@ namespace
                 return;
 
             ServerApi::GetModuleRegistry().Register({
-                "server-api", "0.1.0", {"server", "runtime", "characters", "commands", "events"}});
+                "server-api", "1.0.0", {"server", "runtime", "characters", "commands", "events"}});
 
             ServerApi::GetEventBus().Start();
             if (!_server.Start(_config))

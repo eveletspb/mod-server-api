@@ -8,11 +8,38 @@ authentication and request limits, while the integration module retains
 ownership of its domain logic and data. `GET /api/v1/modules` lists the
 registered module capabilities.
 
+![mod-server-api banner](banner.png)
+
 Built-in endpoints cover health and readiness, server state and metrics,
 online players, the database-backed character catalog, groups, and active
 dungeon/raid instances. The module also provides a world-thread runtime
 snapshot, a bounded in-process EventBus, and optionally Bearer-protected
 `/ws/v1/events` with subscriptions and ping/pong.
+
+## Installation
+
+Place or clone this repository as `modules/mod-server-api` in the
+AzerothCore source tree, then reconfigure and rebuild the core:
+
+```bash
+cmake -S . -B build
+cmake --build build --target worldserver --parallel
+```
+
+The core CMake configuration automatically installs
+`conf/mod-server-api.conf.dist` with the other module configuration files.
+Copy it to the active configuration directory if needed and edit the
+`ServerApi.*` options before starting `worldserver`.
+
+## Requirements
+
+- AzerothCore WotLK source tree.
+- `mod-playerbots` is optional. Without it, the core HTTP API still builds;
+  bot-specific account types are reported as `unknown`.
+
+## License
+
+This project is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
 
 ## Supported API
 
@@ -548,6 +575,18 @@ node ./tests/test-websocket-limit.js
 The test passes when at least one connection is rejected with the configured
 `503 WS_CLIENT_LIMIT` behavior.
 
+## AzerothCore integration
+
+- Configuration: `conf/mod-server-api.conf.dist`, installed automatically by
+  the core CMake configuration.
+- SQL patches: none. The character catalog reads existing Character DB tables;
+  it does not modify the schema.
+- CMake hooks: none. `mod-server-api.cmake` adds the unit-test target when
+  `BUILD_TESTING` is enabled.
+- Core hooks: `WorldScript::OnBeforeConfigLoad`, `OnStartup`, `OnUpdate` and
+  `OnShutdown`; `PlayerScript::OnPlayerLogin`, `OnPlayerLogout` and
+  `OnPlayerJustDied`.
+
 ## Development
 
 The module follows the official [AzerothCore skeleton-module](https://github.com/azerothcore/skeleton-module)
@@ -558,5 +597,5 @@ cmake -S /path/to/azerothcore-wotlk -B /path/to/azerothcore-wotlk/build -DNOPCH=
 cmake --build /path/to/azerothcore-wotlk/build --target worldserver
 ```
 
-Read [docs/project-context.md](docs/project-context.md) and [docs/architecture.md](docs/architecture.md)
-before implementing features.
+Read the [integration guide](docs/integration.md) and
+[architecture notes](docs/architecture.md) before implementing features.
