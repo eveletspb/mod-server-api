@@ -55,4 +55,4 @@ receives `503 WS_CLIENT_LIMIT`.
 | `413` | Request exceeds configured size limit |
 | `429` | Global HTTP request rate limit exceeded |
 | `501` | An optional module integration is unavailable |
-| `503` | Command queue or WebSocket client limit reached |
+| `503` | Command/WebSocket/character request capacity reached or a required database is unavailable |

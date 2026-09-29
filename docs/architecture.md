@@ -8,7 +8,7 @@ The current implementation contains:
 - `ServerApi::ApiServer`, a small Boost.Asio HTTP listener;
 - `ServerApi::EventBus`, a bounded asynchronous event queue;
 - local health endpoints: `GET /health` and `GET /ready`;
-- Runtime endpoints for server, players, groups, instances and optional integrations, optionally protected by Bearer authentication;
+- Runtime endpoints for server, online players, all current-realm characters, groups, instances and optional integrations, optionally protected by Bearer authentication;
 - WebSocket endpoint `GET /ws/v1/events` with subscriptions and ping/pong, optionally protected by Bearer authentication.
 
 Public headers live under `src/ServerApi/` because AzerothCore's automatic
@@ -35,6 +35,12 @@ The intended dependency direction is:
 feature module -> ServerApi integration contract
 mod-server-api -> registered capability adapter
 ```
+
+The read-only character catalog is a core realm-wide administrative endpoint,
+implemented in `CharactersApi` rather than the HTTP router. Character DB reads
+use `CharacterDatabase.AsyncQuery`; the API IO worker polls its own callback
+processor. This is a narrow core-data exception and does not change the schema
+or expose account credentials, bags, bank or mail.
 
 New domain-specific behavior should not be added directly to `ApiServer.cpp`.
 The account API is temporarily removed. Dungeon routes remain a compatibility
@@ -71,7 +77,11 @@ EventBus worker
 
 API IO worker
     ├── accept HTTP connections and write responses
-    └── read server snapshot; never access core game objects
+    ├── poll the API-owned CharacterDatabase callback processor
+    └── read immutable runtime snapshots; never access core game objects
+
+Playerbots account-type cache worker (only when mod-playerbots is compiled)
+    └── refresh account type values through its synchronous module DB pool
 ```
 
 The HTTP adapter handles one request per connection; WebSocket connections are
@@ -86,6 +96,15 @@ and each WebSocket has a bounded
 write queue. It does not pass `Player*`, `Map*`,
 `Group*`, databases, or client sockets across the thread boundary.
 
+`CharactersApi` returns Character DB rows to the API IO worker through an
+API-owned `QueryCallbackProcessor`, not the world query processor. Requests
+are bounded to 32 concurrent operations; list scans use bounded database pages
+and continue through an exclusive GUID cursor. Only copied DTO values cross
+from DB callbacks into response builders. For online records, status and
+location are overlaid from the immutable world-thread snapshot. The optional
+Playerbots account-type cache is copied from its dedicated read-only worker;
+the synchronous Playerbots DB pool is never called from world or HTTP threads.
+
 ## Dependency decision
 
 The AzerothCore checkout already uses Boost.Asio and the configured Boost
@@ -99,7 +118,7 @@ builders because no project-wide JSON DTO dependency is selected.
   secret rotation and authorization scopes remain future work.
 - General REST DTO serialization still needs a selected JSON/HTTP adapter;
   shared escaping and request helpers cover the current manual builders.
-- Game-state reads use a world-thread snapshot; no raw core pointers cross into API workers.
+- Runtime game-state reads use a world-thread snapshot; no raw core pointers cross into API workers. Character DB data is read asynchronously by the API-owned callback processor.
 - State-changing requests must use a world-thread command queue.
 - Account routes are not exposed until their operations have a non-blocking execution model.
 - EventBus queue overflow must be observable and policy-driven before telemetry is connected.

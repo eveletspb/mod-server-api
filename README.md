@@ -1,12 +1,16 @@
 # mod-server-api
 
-Custom AzerothCore module exposing a small, local-first HTTP API for the
-`worldserver` runtime.
+`mod-server-api` adds an HTTP web server to AzerothCore's `worldserver` and
+provides a shared foundation for API integrations from third-party modules.
+An integration registers its own handlers under
+`/api/v1/mod/<module-name>/...`; clients use the common HTTP server, routing,
+authentication and request limits, while the integration module retains
+ownership of its domain logic and data. `GET /api/v1/modules` lists the
+registered module capabilities.
 
-Implemented now: startup banner, lifecycle management, public `/health` and
-`/ready`, optionally Bearer-protected `/api/v1/server` and
-`/api/v1/server/metrics`, online players, groups, active dungeon/raid
-instances, a world-thread server
+Built-in endpoints cover health and readiness, server state and metrics,
+online players, the database-backed character catalog, groups, and active
+dungeon/raid instances. The module also provides a world-thread runtime
 snapshot, a bounded in-process EventBus, and optionally Bearer-protected
 `/ws/v1/events` with subscriptions and ping/pong.
 
@@ -61,9 +65,8 @@ curl -H 'Authorization: Bearer test-secret-key' \
 
 ### Players
 
-The current implementation exposes online runtime players from the world
-thread snapshot. Offline characters and database-backed pagination are not
-included.
+`/api/v1/players` remains the online runtime snapshot. It is separate from the
+database-backed all-character catalog documented below.
 
 | Method | Endpoint | Auth |
 |---|---|---|
@@ -110,6 +113,88 @@ The list response has the following shape:
 The detail response additionally contains `health`, `power` and `position`.
 `power` uses the player's active class power type (mana, rage, energy or runic
 power).
+
+### Characters
+
+The character API is read-only and reads the current realm's Character DB.
+It includes online and offline characters. Deleted rows are hidden by default;
+`includeDeleted=true` includes soft-deleted rows in list results. Character
+details always hide deleted rows and return `404` for a deleted or missing GUID.
+
+| Method | Endpoint | Auth |
+|---|---|---|
+| `GET` | `/api/v1/characters` | Bearer when enabled |
+| `GET` | `/api/v1/characters/{guid}` | Bearer when enabled |
+
+List parameters:
+
+| Parameter | Description |
+|---|---|
+| `limit` | Page size, default 100, maximum 1000 |
+| `cursor` | Exclusive GUID cursor from the prior response's `nextCursor` |
+| `name` | Case-insensitive name prefix |
+| `accountId`, `guildId`, `race`, `class`, `mapId`, `zoneId` | Exact match |
+| `online`, `bot`, `includeDeleted` | Boolean (`true`/`false` or `1`/`0`) |
+| `botType` | `player`, `random`, `addclass` or `unknown` |
+| `minLevel`, `maxLevel` | Inclusive level bounds |
+
+Filters are combined with `AND`. Unknown or repeated parameters, invalid values,
+and `minLevel > maxLevel` return `400 INVALID_FILTER`. The cursor is an
+exclusive GUID: keep the same filters and pass the previous `nextCursor` to
+continue. A response has this shape:
+
+```json
+{
+  "data": [{"guid": 123, "name": "Papas", "online": true}],
+  "hasMore": true,
+  "nextCursor": 123
+}
+```
+
+Results are ordered by ascending GUID and return `data`, `hasMore` and
+`nextCursor`; the API does not calculate a total count. Dynamic filters use the
+current immutable online snapshot. If a selective filter needs to scan more
+than 10,000 database candidates, a page can contain fewer than `limit` rows;
+continue with `nextCursor` while `hasMore` is true. Concurrent catalog/profile
+requests are capped at 32 and excess requests receive `503`.
+
+Each list entry includes `guid`, `accountId`, `name`, `race`, `class`, `gender`,
+`level`, `guildId`, `guildName`, `online`, `bot`, `botType`, `deleted`,
+`mapId`, `zoneId` and `location` (`mapId`, `zoneId`, `x`, `y`, `z` and
+`orientation`). A profile adds `xp`, `money`, `talents` (`activeGroup` and
+`totalGroups`), `equipment` entries (`slot` and `itemEntry`) and `professions`
+(`skillId`, `name`, `value` and `max`).
+
+Online status, map, zone and coordinates are taken from the current runtime
+snapshot for online characters. Other character fields are read from DB and
+may reflect the last saved state. Bot sessions are detected from the runtime
+snapshot; `random` and `addclass` types come from Playerbots account assignments.
+Without Playerbots or its account-type table, `botType` is `unknown`. A
+Playerbots bot on an ordinary player account can therefore have `bot=true` and
+`botType=player` while online; offline bot status is inferred only from
+Playerbots account type.
+
+The profile includes core identity/level fields, account ID, guild, effective
+location, equipped items in equipment slots, active talent group, and profession
+skill values. Bags, bank, mail and account credentials are not exposed.
+
+Examples:
+
+```bash
+curl -H 'Authorization: Bearer test-secret-key' \
+  'http://127.0.0.1:7878/api/v1/characters?limit=100&name=pap&online=false&minLevel=20'
+
+curl -H 'Authorization: Bearer test-secret-key' \
+  'http://127.0.0.1:7878/api/v1/characters?limit=100&name=pap&cursor=123'
+
+curl -H 'Authorization: Bearer test-secret-key' \
+  'http://127.0.0.1:7878/api/v1/characters/123'
+```
+
+Character endpoint errors use `400 INVALID_FILTER` or `INVALID_GUID` for bad
+input, `404 CHARACTER_NOT_FOUND` for a missing or deleted profile, and
+`503 DATABASE_UNAVAILABLE` or `CHARACTER_QUEUE_FULL` when the database or
+bounded request capacity is unavailable.
 
 ### Modules
 
@@ -262,12 +347,12 @@ aggregator.
 |---:|---|
 | `400` | Invalid request or command parameters |
 | `401` | Missing or invalid Bearer token when authentication is enabled |
-| `404` | Unknown endpoint or player not found |
+| `404` | Unknown endpoint or character/player not found |
 | `405` | Known endpoint called with an unsupported method |
 | `413` | Request exceeds `ServerApi.MaxRequestBytes` |
 | `429` | Global HTTP request rate limit exceeded |
 | `501` | Optional integration is unavailable |
-| `503` | Command queue or WebSocket client limit reached |
+| `503` | Character database/request capacity, command queue or WebSocket client limit reached |
 
 ### cURL examples
 

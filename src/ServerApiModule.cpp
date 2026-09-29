@@ -136,7 +136,7 @@ namespace
                 return;
 
             ServerApi::GetModuleRegistry().Register({
-                "server-api", "0.1.0", {"server", "runtime", "commands", "events"}});
+                "server-api", "0.1.0", {"server", "runtime", "characters", "commands", "events"}});
 
             ServerApi::GetEventBus().Start();
             if (!_server.Start(_config))

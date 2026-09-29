@@ -111,7 +111,10 @@ namespace ServerApi
             playerSnapshot.power = player->GetPower(powerType);
             playerSnapshot.maxPower = player->GetMaxPower(powerType);
             if (WorldSession* session = player->GetSession())
+            {
+                playerSnapshot.accountId = session->GetAccountId();
                 playerSnapshot.bot = session->IsBot();
+            }
             if (playerSnapshot.bot)
                 ++updated.botsOnline;
             playerSnapshot.inCombat = player->IsInCombat();

@@ -10,6 +10,7 @@ tags:
   - name: Health
   - name: Server
   - name: Players
+  - name: Characters
   - name: Groups
   - name: Instances
   - name: Bots
@@ -88,7 +89,7 @@ paths:
         - {$ref: '#/components/parameters/Limit'}
       responses:
         '200':
-          description: Online players
+          description: Online runtime players from the immutable world snapshot
           content:
             application/json:
               schema:
@@ -115,6 +116,53 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/characters:
+    get:
+      tags: [Characters]
+      security: [{bearerAuth: []}, {}]
+      summary: List all current-realm characters
+      description: Cursor pagination ordered by ascending GUID. Dynamic online/location/bot filters use the current runtime snapshot. No total count is calculated.
+      parameters:
+        - {$ref: '#/components/parameters/CharacterLimit'}
+        - {$ref: '#/components/parameters/CharacterCursor'}
+        - {$ref: '#/components/parameters/CharacterName'}
+        - {$ref: '#/components/parameters/CharacterAccountId'}
+        - {$ref: '#/components/parameters/CharacterOnline'}
+        - {$ref: '#/components/parameters/CharacterBot'}
+        - {$ref: '#/components/parameters/CharacterBotType'}
+        - {$ref: '#/components/parameters/CharacterRace'}
+        - {$ref: '#/components/parameters/CharacterClass'}
+        - {$ref: '#/components/parameters/CharacterMinLevel'}
+        - {$ref: '#/components/parameters/CharacterMaxLevel'}
+        - {$ref: '#/components/parameters/CharacterGuildId'}
+        - {$ref: '#/components/parameters/CharacterMapId'}
+        - {$ref: '#/components/parameters/CharacterZoneId'}
+        - {$ref: '#/components/parameters/CharacterIncludeDeleted'}
+      responses:
+        '200':
+          description: Character page; a selective dynamic filter can produce a short page while hasMore remains true.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CharacterPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/CharacterUnavailable'}
+  /api/v1/characters/{guid}:
+    get:
+      tags: [Characters]
+      security: [{bearerAuth: []}, {}]
+      summary: Get an administrative character profile
+      parameters: [{$ref: '#/components/parameters/CharacterGuid'}]
+      responses:
+        '200':
+          description: Character profile with equipped items, talent group and profession skills
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CharacterProfile'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/CharacterUnavailable'}
   /api/v1/groups:
     get:
       tags: [Groups]
@@ -250,6 +298,11 @@ components:
       in: path
       required: true
       schema: {type: integer, format: int64, minimum: 1}
+    CharacterGuid:
+      name: guid
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1, maximum: 4294967295}
     ResourceId:
       name: id
       in: path
@@ -269,12 +322,90 @@ components:
       name: mapId
       in: query
       required: false
-      schema: {type: integer, format: int32, minimum: 0}
+      schema: {type: integer, format: int64, minimum: 0, maximum: 4294967295}
     Limit:
       name: limit
       in: query
       required: false
       schema: {type: integer, format: int32, minimum: 1, maximum: 1000, default: 100}
+    CharacterLimit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1, maximum: 1000, default: 100}
+    CharacterCursor:
+      name: cursor
+      in: query
+      required: false
+      description: Exclusive GUID cursor returned as nextCursor by the previous page.
+      schema: {type: integer, format: int32, minimum: 0}
+    CharacterName:
+      name: name
+      in: query
+      required: false
+      description: Case-insensitive name prefix.
+      schema: {type: string, maxLength: 64}
+    CharacterAccountId:
+      name: accountId
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1}
+    CharacterOnline:
+      name: online
+      in: query
+      required: false
+      schema: {type: boolean}
+    CharacterBot:
+      name: bot
+      in: query
+      required: false
+      schema: {type: boolean}
+    CharacterBotType:
+      name: botType
+      in: query
+      required: false
+      schema: {type: string, enum: [player, random, addclass, unknown]}
+    CharacterRace:
+      name: race
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1, maximum: 255}
+    CharacterClass:
+      name: class
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1, maximum: 255}
+    CharacterMinLevel:
+      name: minLevel
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1, maximum: 255}
+    CharacterMaxLevel:
+      name: maxLevel
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1, maximum: 255}
+    CharacterGuildId:
+      name: guildId
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 1}
+    CharacterMapId:
+      name: mapId
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 0}
+    CharacterZoneId:
+      name: zoneId
+      in: query
+      required: false
+      schema: {type: integer, format: int32, minimum: 0}
+    CharacterIncludeDeleted:
+      name: includeDeleted
+      in: query
+      required: false
+      description: Include soft-deleted rows in list results. Deleted profiles remain hidden.
+      schema: {type: boolean, default: false}
   responses:
     BadRequest:
       description: Invalid request
@@ -298,6 +429,11 @@ components:
           schema: {$ref: '#/components/schemas/Error'}
     QueueFull:
       description: World-thread command queue is full
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    CharacterUnavailable:
+      description: Character database unavailable or character request capacity reached
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -369,6 +505,76 @@ components:
             health: {type: object}
             power: {type: object}
             position: {type: object}
+    CharacterPage:
+      type: object
+      required: [data, hasMore, nextCursor]
+      properties:
+        data:
+          type: array
+          items: {$ref: '#/components/schemas/Character'}
+        hasMore: {type: boolean}
+        nextCursor: {type: integer, format: int64, nullable: true, maximum: 4294967295}
+    Character:
+      type: object
+      required: [guid, accountId, name, race, class, gender, level, guildId, guildName, online, bot, botType, deleted, mapId, zoneId, location]
+      properties:
+        guid: {type: integer, format: int64, maximum: 4294967295}
+        accountId: {type: integer, format: int64, maximum: 4294967295}
+        name: {type: string}
+        race: {type: integer, format: int32}
+        class: {type: integer, format: int32}
+        gender: {type: integer, format: int32}
+        level: {type: integer, format: int32}
+        guildId: {type: integer, format: int64, maximum: 4294967295}
+        guildName: {type: string}
+        online: {type: boolean}
+        bot: {type: boolean}
+        botType: {type: string, enum: [player, random, addclass, unknown]}
+        deleted: {type: boolean}
+        mapId: {type: integer, format: int32}
+        zoneId: {type: integer, format: int32}
+        location:
+          type: object
+          required: [mapId, zoneId, x, y, z, orientation]
+          properties:
+            mapId: {type: integer, format: int32}
+            zoneId: {type: integer, format: int32}
+            x: {type: number, format: float}
+            y: {type: number, format: float}
+            z: {type: number, format: float}
+            orientation: {type: number, format: float}
+    CharacterProfile:
+      allOf:
+        - {$ref: '#/components/schemas/Character'}
+        - type: object
+          required: [xp, money, talents, equipment, professions]
+          properties:
+            xp: {type: integer, format: int64, maximum: 4294967295}
+            money: {type: integer, format: int64, maximum: 4294967295}
+            talents:
+              type: object
+              required: [activeGroup, totalGroups]
+              properties:
+                activeGroup: {type: integer, format: int32}
+                totalGroups: {type: integer, format: int32}
+            equipment:
+              type: array
+              items:
+                type: object
+                required: [slot, itemEntry]
+                properties:
+                  slot: {type: integer, format: int32}
+                  itemEntry: {type: integer, format: int32}
+            professions:
+              type: array
+              items:
+                type: object
+                required: [skillId, name, value, max]
+                properties:
+                  skillId: {type: integer, format: int32}
+                  name: {type: string}
+                  value: {type: integer, format: int32}
+                  max: {type: integer, format: int32}
     Group:
       type: object
       required: [id, leaderGuid, raid, members]

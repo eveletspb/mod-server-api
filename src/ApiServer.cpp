@@ -3,6 +3,7 @@
  */
 
 #include "ServerApi/ApiServer.h"
+#include "ServerApi/CharactersApi.h"
 #include "ServerApi/CommandQueue.h"
 #include "ServerApi/EventBus.h"
 #include "ServerApi/HttpUtils.h"
@@ -21,6 +22,8 @@
 #include <cmath>
 #include <deque>
 #include <exception>
+#include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -482,9 +485,11 @@ namespace ServerApi
     public:
         HttpSession(boost::asio::ip::tcp::socket socket, Config config,
             std::shared_ptr<std::atomic_uint32_t> webSocketClients,
-            std::shared_ptr<RequestRateLimiter> requestRateLimiter)
+            std::shared_ptr<RequestRateLimiter> requestRateLimiter,
+            std::shared_ptr<CharactersApi> charactersApi)
             : _socket(std::move(socket)), _config(std::move(config)),
-              _webSocketClients(std::move(webSocketClients)), _requestRateLimiter(std::move(requestRateLimiter)) { }
+              _webSocketClients(std::move(webSocketClients)), _requestRateLimiter(std::move(requestRateLimiter)),
+              _charactersApi(std::move(charactersApi)) { }
 
         void Start()
         {
@@ -598,6 +603,44 @@ namespace ServerApi
                 if (!RequireMethod(method, "GET"))
                     return;
                 WriteResponse(200, "OK", BuildModulesResponse());
+            }
+            else if (path == "/api/v1/characters" || path.rfind("/api/v1/characters/", 0) == 0)
+            {
+                if (!RequireMethod(method, "GET"))
+                    return;
+
+                std::weak_ptr<HttpSession> weakSelf = weak_from_this();
+                auto completion = [weakSelf](ApiResponse response)
+                {
+                    if (auto self = weakSelf.lock())
+                    {
+                        boost::asio::post(self->_socket.get_executor(),
+                            [self, response = std::move(response)]() mutable
+                        {
+                            self->WriteResponse(response.status, response.reason, response.body);
+                        });
+                    }
+                };
+
+                if (path == "/api/v1/characters")
+                {
+                    if (!_charactersApi || !_charactersApi->List(target, std::move(completion)))
+                        WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    return;
+                }
+
+                uint64_t parsedGuid = 0;
+                if (!ParseResourceId(path, "/api/v1/characters/", parsedGuid) || parsedGuid == 0 ||
+                    parsedGuid > std::numeric_limits<uint32_t>::max())
+                {
+                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_GUID"}})");
+                    return;
+                }
+                if (!_charactersApi || !_charactersApi->Get(static_cast<uint32_t>(parsedGuid), std::move(completion)))
+                    WriteResponse(503, "Service Unavailable",
+                        R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                return;
             }
             else if (path == "/api/v1/groups" || path.rfind("/api/v1/groups/", 0) == 0)
             {
@@ -827,6 +870,7 @@ namespace ServerApi
         std::string _response;
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter;
+        std::shared_ptr<CharactersApi> _charactersApi;
     };
 
     ApiServer::~ApiServer()
@@ -868,6 +912,8 @@ namespace ServerApi
             return false;
         }
 
+        _charactersApi = std::make_shared<CharactersApi>(_ioContext);
+        _charactersApi->Start();
         AcceptNext();
         _thread = std::thread([this]
         {
@@ -883,12 +929,25 @@ namespace ServerApi
         if (!_running.exchange(false))
             return;
 
+        if (_charactersApi && _thread.joinable())
+        {
+            auto stopped = std::make_shared<std::promise<void>>();
+            std::future<void> completed = stopped->get_future();
+            boost::asio::post(_ioContext, [charactersApi = _charactersApi, stopped]
+            {
+                charactersApi->Stop();
+                stopped->set_value();
+            });
+            completed.wait();
+        }
+
         _ioContext.stop();
         if (_thread.joinable())
             _thread.join();
 
         boost::system::error_code error;
         _acceptor.close(error);
+        _charactersApi.reset();
         _ioContext.restart();
         LOG_INFO("server-api.http", "Server API stopped");
     }
@@ -899,7 +958,7 @@ namespace ServerApi
         {
             if (!error)
                 std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
-                    _requestRateLimiter)->Start();
+                    _requestRateLimiter, _charactersApi)->Start();
 
             if (_running)
                 AcceptNext();

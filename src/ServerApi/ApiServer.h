@@ -17,6 +17,8 @@
 
 namespace ServerApi
 {
+    class CharactersApi;
+
     class ApiServer
     {
     public:
@@ -39,6 +41,7 @@ namespace ServerApi
         boost::asio::io_context _ioContext;
         boost::asio::ip::tcp::acceptor _acceptor{_ioContext};
         Config _config;
+        std::shared_ptr<CharactersApi> _charactersApi;
         std::thread _thread;
         std::atomic_bool _running = false;
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients = std::make_shared<std::atomic_uint32_t>(0);

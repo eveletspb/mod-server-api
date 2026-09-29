@@ -1,5 +1,6 @@
 .agents/skills/mod-server-api-project/
 docs/project-context.md
+/docs/
 docs/project-layer-skill/
 
 # Generic files from the AzerothCore skeleton-module template.

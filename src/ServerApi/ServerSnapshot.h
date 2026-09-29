@@ -25,6 +25,7 @@ namespace ServerApi
     struct PlayerSnapshot
     {
         uint64_t guid = 0;
+        uint32_t accountId = 0;
         std::string name;
         uint8_t level = 0;
         uint8_t playerClass = 0;
