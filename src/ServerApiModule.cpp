@@ -22,6 +22,8 @@
 
 namespace
 {
+    constexpr char ServerApiVersion[] = "1.1.0";
+
     std::unordered_map<std::string, std::string> BuildPlayerEventData(Player* player)
     {
         return {
@@ -82,11 +84,11 @@ namespace
     {
         LOG_INFO("server.loading", "+--------------------------------------+");
         LOG_INFO("server.loading", "|          MOD-SERVER-API              |");
-        LOG_INFO("server.loading", "|   AzerothCore runtime bridge v1.0.0 |");
+        LOG_INFO("server.loading", "|   AzerothCore runtime bridge v{} |", ServerApiVersion);
         LOG_INFO("server.loading", "+--------------------------------------+");
         LOG_INFO("server.loading", ">> Status: {}", config.enabled ? "enabled" : "disabled by configuration");
         LOG_INFO("server.loading", ">> Listener: {}:{}", config.bindAddress, config.port);
-        LOG_INFO("server.loading", ">> Authentication: {}", config.authEnabled ? "Bearer enabled" : "disabled");
+        LOG_INFO("server.loading", ">> Authentication provider: {}", config.authProvider);
         LOG_INFO("server.loading", ">> HTTP limits: request={} bytes, rate={}/s (0 = unlimited)",
             config.maxRequestBytes, config.maxRequestsPerSecond);
         LOG_INFO("server.loading", ">> WebSocket: {}", config.webSocketEnabled ? "enabled" : "disabled");
@@ -136,7 +138,7 @@ namespace
                 return;
 
             ServerApi::GetModuleRegistry().Register({
-                "server-api", "1.0.0", {"server", "runtime", "characters", "commands", "events"}});
+                "server-api", ServerApiVersion, {"server", "runtime", "characters", "commands", "events"}});
 
             ServerApi::GetEventBus().Start();
             if (!_server.Start(_config))

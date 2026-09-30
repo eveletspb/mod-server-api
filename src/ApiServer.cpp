@@ -3,6 +3,7 @@
  */
 
 #include "ServerApi/ApiServer.h"
+#include "ServerApi/Authentication.h"
 #include "ServerApi/CharactersApi.h"
 #include "ServerApi/CommandQueue.h"
 #include "ServerApi/EventBus.h"
@@ -18,7 +19,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <deque>
 #include <exception>
@@ -51,31 +51,73 @@ namespace ServerApi
                 status, reason, body.size(), headers, body);
         }
 
-        bool HasValidBearerToken(std::string const& request, Config const& config)
+        template <typename Handler>
+        void ForEachRequestHeader(std::string_view request, Handler&& handler)
         {
-            if (!config.authEnabled)
-                return true;
-
-            if (config.apiKey.empty())
-                return false;
-
-            static constexpr std::string_view BearerPrefix = "Bearer ";
-            std::string const authorization = HeaderValue(request, "authorization");
-            if (!authorization.starts_with(BearerPrefix))
-                return false;
-
-            std::string_view const token(authorization.data() + BearerPrefix.size(),
-                authorization.size() - BearerPrefix.size());
-            if (token.size() != config.apiKey.size())
-                return false;
-
-            unsigned char difference = 0;
-            for (std::size_t index = 0; index < token.size(); ++index)
+            std::size_t lineStart = request.find("\r\n");
+            while (lineStart != std::string::npos)
             {
-                difference |= static_cast<unsigned char>(token[index]) ^
-                    static_cast<unsigned char>(config.apiKey[index]);
+                lineStart += 2;
+                std::size_t const lineEnd = request.find("\r\n", lineStart);
+                if (lineEnd == std::string::npos || lineEnd == lineStart)
+                    break;
+
+                std::size_t const colon = request.find(':', lineStart);
+                if (colon != std::string::npos && colon < lineEnd)
+                {
+                    std::string_view const name = request.substr(lineStart, colon - lineStart);
+                    std::size_t valueStart = colon + 1;
+                    while (valueStart < lineEnd && (request[valueStart] == ' ' || request[valueStart] == '\t'))
+                        ++valueStart;
+                    std::size_t valueEnd = lineEnd;
+                    while (valueEnd > valueStart && (request[valueEnd - 1] == ' ' || request[valueEnd - 1] == '\t'))
+                        --valueEnd;
+                    handler(name, request.substr(valueStart, valueEnd - valueStart));
+                }
+
+                lineStart = lineEnd;
             }
-            return difference == 0;
+        }
+
+        AuthenticationRequest MakeAuthenticationRequest(std::string_view request,
+            std::string const& method, std::string const& target)
+        {
+            AuthenticationRequest authenticationRequest;
+            authenticationRequest.method = method;
+            authenticationRequest.target = target;
+            ForEachRequestHeader(request, [&authenticationRequest](std::string_view name, std::string_view value)
+            {
+                authenticationRequest.headers.push_back({std::string(name), std::string(value)});
+            });
+            return authenticationRequest;
+        }
+
+        bool IsSafeHeaderValue(std::string_view value)
+        {
+            return std::all_of(value.begin(), value.end(), [](unsigned char character)
+            {
+                return character == '\t' || (character >= 0x20 && character != 0x7f);
+            });
+        }
+
+        bool IsSafeIdentitySubject(std::string_view subject)
+        {
+            return !subject.empty() && std::all_of(subject.begin(), subject.end(), [](unsigned char character)
+            {
+                return character >= 0x20 && character != 0x7f;
+            });
+        }
+
+        std::string AuthenticationChallengeHeader(std::string_view challenge)
+        {
+            if (challenge.empty() || !IsSafeHeaderValue(challenge))
+                return {};
+            return "WWW-Authenticate: " + std::string(challenge) + "\r\n";
+        }
+
+        bool IsProtectedEndpoint(std::string_view path)
+        {
+            return path.starts_with("/api/v1/") || path == "/ws/v1/events";
         }
 
         std::string BuildServerResponse()
@@ -289,9 +331,10 @@ namespace ServerApi
         {
         public:
             WebSocketSession(boost::asio::ip::tcp::socket socket, Config config,
-                std::shared_ptr<std::atomic_uint32_t> webSocketClients)
+                std::shared_ptr<std::atomic_uint32_t> webSocketClients,
+                std::optional<AuthIdentity> identity)
                 : _socket(std::move(socket)), _config(std::move(config)),
-                  _webSocketClients(std::move(webSocketClients)) { }
+                  _webSocketClients(std::move(webSocketClients)), _identity(std::move(identity)) { }
 
             ~WebSocketSession()
             {
@@ -477,6 +520,7 @@ namespace ServerApi
             std::vector<SubscriptionId> _subscriptions;
             std::deque<std::string> _writeQueue;
             std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
+            std::optional<AuthIdentity> _identity;
         };
     }
 
@@ -486,10 +530,14 @@ namespace ServerApi
         HttpSession(boost::asio::ip::tcp::socket socket, Config config,
             std::shared_ptr<std::atomic_uint32_t> webSocketClients,
             std::shared_ptr<RequestRateLimiter> requestRateLimiter,
-            std::shared_ptr<CharactersApi> charactersApi)
+            std::shared_ptr<CharactersApi> charactersApi,
+            std::shared_ptr<AuthenticationProvider> authenticationProvider,
+            bool authenticationRequired)
             : _socket(std::move(socket)), _config(std::move(config)),
               _webSocketClients(std::move(webSocketClients)), _requestRateLimiter(std::move(requestRateLimiter)),
-              _charactersApi(std::move(charactersApi)) { }
+              _charactersApi(std::move(charactersApi)),
+              _authenticationProvider(std::move(authenticationProvider)),
+              _authenticationRequired(authenticationRequired) { }
 
         void Start()
         {
@@ -497,6 +545,60 @@ namespace ServerApi
         }
 
     private:
+        bool AuthenticateRequest(std::string_view path, std::string const& method, std::string const& target,
+            std::optional<AuthIdentity>& identity)
+        {
+            if (!IsProtectedEndpoint(path))
+                return true;
+
+            if (!_authenticationProvider)
+            {
+                WriteAuthenticationProviderFailure("is unavailable");
+                return false;
+            }
+
+            AuthenticationResult result;
+            try
+            {
+                result = _authenticationProvider->Authenticate(MakeAuthenticationRequest(_request, method, target));
+            }
+            catch (...)
+            {
+                WriteAuthenticationProviderFailure("failed");
+                return false;
+            }
+
+            if (!result.accepted)
+            {
+                if (!IsSafeHeaderValue(result.challenge))
+                {
+                    WriteAuthenticationProviderFailure("returned an invalid challenge");
+                    return false;
+                }
+
+                WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})",
+                    AuthenticationChallengeHeader(result.challenge));
+                return false;
+            }
+
+            if ((_authenticationRequired && !result.subject) ||
+                (result.subject && !IsSafeIdentitySubject(*result.subject)))
+            {
+                WriteAuthenticationProviderFailure("returned an invalid identity");
+                return false;
+            }
+
+            if (result.subject)
+                identity = AuthIdentity{_config.authProvider, std::move(*result.subject)};
+            return true;
+        }
+
+        void WriteAuthenticationProviderFailure(std::string_view reason)
+        {
+            LOG_ERROR("server-api.auth", "Authentication provider {} {}", _config.authProvider, reason);
+            WriteResponse(500, "Internal Server Error", R"({"error":{"code":"AUTH_PROVIDER_FAILED"}})");
+        }
+
         void ReadRequest()
         {
             auto self = shared_from_this();
@@ -544,13 +646,9 @@ namespace ServerApi
             }
 
             std::string const path = PathFromTarget(target);
-            bool const protectedEndpoint = path.starts_with("/api/v1/") || path == "/ws/v1/events";
-            if (protectedEndpoint && !HasValidBearerToken(_request, _config))
-            {
-                WriteResponse(401, "Unauthorized", R"({"error":{"code":"UNAUTHORIZED"}})",
-                    "WWW-Authenticate: Bearer\r\n");
+            std::optional<AuthIdentity> identity;
+            if (!AuthenticateRequest(path, method, target, identity))
                 return;
-            }
 
             if (path == "/health")
             {
@@ -585,7 +683,8 @@ namespace ServerApi
                     return;
                 }
 
-                auto session = std::make_shared<WebSocketSession>(std::move(_socket), _config, _webSocketClients);
+                auto session = std::make_shared<WebSocketSession>(
+                    std::move(_socket), _config, _webSocketClients, std::move(identity));
                 session->Start(BuildWebSocketRequest(target));
             }
             else if (path == "/api/v1/server" || path == "/api/v1/server/metrics")
@@ -795,7 +894,7 @@ namespace ServerApi
             else
             {
                 std::optional<ModuleApiResponse> const response = GetModuleRegistry().Dispatch({
-                    method, target, path});
+                    method, target, path, std::move(identity)});
                 if (response)
                 {
                     WriteResponse(response->status, response->reason, response->body, response->headers);
@@ -827,25 +926,10 @@ namespace ServerApi
         WebSocketRequest BuildWebSocketRequest(std::string const& target) const
         {
             WebSocketRequest request{boost::beast::http::verb::get, target, 11};
-            std::size_t lineStart = _request.find("\r\n");
-            while (lineStart != std::string::npos)
+            ForEachRequestHeader(_request, [&request](std::string_view name, std::string_view value)
             {
-                lineStart += 2;
-                std::size_t lineEnd = _request.find("\r\n", lineStart);
-                if (lineEnd == std::string::npos || lineEnd == lineStart)
-                    break;
-
-                std::size_t const colon = _request.find(':', lineStart);
-                if (colon != std::string::npos && colon < lineEnd)
-                {
-                    std::string name = _request.substr(lineStart, colon - lineStart);
-                    std::string value = _request.substr(colon + 1, lineEnd - colon - 1);
-                    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-                        value.erase(value.begin());
-                    request.set(name, value);
-                }
-                lineStart = lineEnd;
-            }
+                request.set(std::string(name), std::string(value));
+            });
             return request;
         }
 
@@ -871,6 +955,8 @@ namespace ServerApi
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter;
         std::shared_ptr<CharactersApi> _charactersApi;
+        std::shared_ptr<AuthenticationProvider> _authenticationProvider;
+        bool _authenticationRequired = false;
     };
 
     ApiServer::~ApiServer()
@@ -886,6 +972,38 @@ namespace ServerApi
         _config = std::move(config);
         _ioContext.restart();
 
+        std::unique_ptr<AuthenticationProvider> configuredProvider;
+        try
+        {
+            configuredProvider = GetAuthenticationProviderRegistry().Create(_config.authProvider);
+        }
+        catch (...)
+        {
+            LOG_ERROR("server-api.config", "Authentication provider {} could not be created", _config.authProvider);
+            _running = false;
+            return false;
+        }
+        if (!configuredProvider)
+        {
+            LOG_ERROR("server-api.config",
+                "Authentication provider {} is not registered or returned no instance", _config.authProvider);
+            _running = false;
+            return false;
+        }
+
+        bool authenticationRequired = false;
+        try
+        {
+            authenticationRequired = configuredProvider->RequiresAuthentication();
+        }
+        catch (...)
+        {
+            LOG_ERROR("server-api.config", "Authentication provider {} could not report its policy",
+                _config.authProvider);
+            _running = false;
+            return false;
+        }
+
         boost::system::error_code error;
         boost::asio::ip::address const address = boost::asio::ip::make_address(_config.bindAddress, error);
         if (error)
@@ -894,6 +1012,17 @@ namespace ServerApi
             _running = false;
             return false;
         }
+
+        if (!IsAuthenticationProviderAllowedForBind(authenticationRequired, address.is_loopback()))
+        {
+            LOG_ERROR("server-api.config", "Refusing non-local bind {} with provider {} that allows anonymous access",
+                _config.bindAddress, _config.authProvider);
+            _running = false;
+            return false;
+        }
+
+        _authenticationProvider = std::shared_ptr<AuthenticationProvider>(std::move(configuredProvider));
+        _authenticationRequired = authenticationRequired;
 
         _acceptor.open(address.is_v6() ? boost::asio::ip::tcp::v6() : boost::asio::ip::tcp::v4(), error);
         if (!error)
@@ -908,6 +1037,8 @@ namespace ServerApi
             LOG_ERROR("server-api.http", "Could not bind {}:{}: {}", _config.bindAddress, _config.port,
                 error.message());
             _acceptor.close();
+            _authenticationProvider.reset();
+            _authenticationRequired = false;
             _running = false;
             return false;
         }
@@ -948,6 +1079,8 @@ namespace ServerApi
         boost::system::error_code error;
         _acceptor.close(error);
         _charactersApi.reset();
+        _authenticationProvider.reset();
+        _authenticationRequired = false;
         _ioContext.restart();
         LOG_INFO("server-api.http", "Server API stopped");
     }
@@ -958,7 +1091,8 @@ namespace ServerApi
         {
             if (!error)
                 std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
-                    _requestRateLimiter, _charactersApi)->Start();
+                    _requestRateLimiter, _charactersApi, _authenticationProvider,
+                    _authenticationRequired)->Start();
 
             if (_running)
                 AcceptNext();

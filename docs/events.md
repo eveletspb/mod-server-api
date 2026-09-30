@@ -1,13 +1,15 @@
 # Events
 
-Realtime events are delivered through the authenticated WebSocket endpoint:
+Realtime events are delivered through the WebSocket endpoint:
 
 ```text
 ws://127.0.0.1:7878/ws/v1/events
 ```
 
-When `ServerApi.Auth.Enable = 0` on localhost, the handshake does not require
-an Authorization header. Otherwise use `Authorization: Bearer <api-key>`.
+The handshake uses the provider selected by `ServerApi.Auth.Provider`.
+The default `none` provider accepts local connections without credentials;
+custom providers inspect the handshake request using the same authentication
+contract as REST endpoints.
 
 ## Client messages
 

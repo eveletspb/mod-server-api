@@ -1,8 +1,15 @@
 openapi: 3.0.3
 info:
   title: mod-server-api
-  version: 0.1.0
-  description: Runtime HTTP API for an AzerothCore WotLK worldserver. Bearer authentication is optional and disabled by default on localhost; authorization scopes are not implemented.
+  version: 1.1.0
+  description: Runtime HTTP API for an AzerothCore WotLK worldserver. Authentication is selected by provider and defaults to none on localhost; authorization scopes are not implemented.
+x-authentication:
+  providerSetting: ServerApi.Auth.Provider
+  defaultProvider: none
+  protectedPaths: [/api/v1/*, /ws/v1/events]
+  publicPaths: [/health, /ready]
+  providers: Registered by compiled AzerothCore modules; see docs/auth.md.
+  providerFailure: {status: 500, errorCode: AUTH_PROVIDER_FAILED}
 servers:
   - url: http://127.0.0.1:7878
     description: Default local listener
@@ -39,7 +46,6 @@ paths:
   /api/v1/server:
     get:
       tags: [Server]
-      security: [{bearerAuth: []}, {}]
       summary: Runtime server snapshot
       responses:
         '200':
@@ -51,7 +57,6 @@ paths:
   /api/v1/server/metrics:
     get:
       tags: [Server]
-      security: [{bearerAuth: []}, {}]
       summary: Runtime server metrics
       responses:
         '200':
@@ -63,7 +68,6 @@ paths:
   /api/v1/modules:
     get:
       tags: [Server]
-      security: [{bearerAuth: []}, {}]
       summary: List registered API modules and capabilities
       responses:
         '200':
@@ -81,7 +85,6 @@ paths:
   /api/v1/players:
     get:
       tags: [Players]
-      security: [{bearerAuth: []}, {}]
       summary: List online players
       parameters:
         - {$ref: '#/components/parameters/Name'}
@@ -104,7 +107,6 @@ paths:
   /api/v1/players/{guid}:
     get:
       tags: [Players]
-      security: [{bearerAuth: []}, {}]
       summary: Get one online player
       parameters: [{$ref: '#/components/parameters/Guid'}]
       responses:
@@ -119,7 +121,6 @@ paths:
   /api/v1/characters:
     get:
       tags: [Characters]
-      security: [{bearerAuth: []}, {}]
       summary: List all current-realm characters
       description: Cursor pagination ordered by ascending GUID. Dynamic online/location/bot filters use the current runtime snapshot. No total count is calculated.
       parameters:
@@ -150,7 +151,6 @@ paths:
   /api/v1/characters/{guid}:
     get:
       tags: [Characters]
-      security: [{bearerAuth: []}, {}]
       summary: Get an administrative character profile
       parameters: [{$ref: '#/components/parameters/CharacterGuid'}]
       responses:
@@ -166,7 +166,6 @@ paths:
   /api/v1/groups:
     get:
       tags: [Groups]
-      security: [{bearerAuth: []}, {}]
       summary: List groups visible through online players
       responses:
         '200':
@@ -184,7 +183,6 @@ paths:
   /api/v1/groups/{id}:
     get:
       tags: [Groups]
-      security: [{bearerAuth: []}, {}]
       summary: Get one group
       parameters: [{$ref: '#/components/parameters/ResourceId'}]
       responses:
@@ -199,7 +197,6 @@ paths:
   /api/v1/instances:
     get:
       tags: [Instances]
-      security: [{bearerAuth: []}, {}]
       summary: List active dungeon and raid instances
       responses:
         '200':
@@ -217,7 +214,6 @@ paths:
   /api/v1/instances/{instanceId}:
     get:
       tags: [Instances]
-      security: [{bearerAuth: []}, {}]
       summary: Get one active instance
       parameters: [{$ref: '#/components/parameters/InstanceId'}]
       responses:
@@ -232,7 +228,6 @@ paths:
   /api/v1/bots:
     get:
       tags: [Bots]
-      security: [{bearerAuth: []}, {}]
       summary: List online playerbots
       description: Returns 501 when mod-playerbots is not compiled into worldserver.
       responses:
@@ -252,7 +247,6 @@ paths:
   /api/v1/players/{guid}/kick:
     post:
       tags: [Commands]
-      security: [{bearerAuth: []}, {}]
       summary: Queue a player kick
       description: The command is executed on the next world update.
       parameters: [{$ref: '#/components/parameters/Guid'}]
@@ -268,7 +262,6 @@ paths:
   /api/v1/players/{guid}/teleport:
     post:
       tags: [Commands]
-      security: [{bearerAuth: []}, {}]
       summary: Queue a player teleport
       parameters:
         - {$ref: '#/components/parameters/Guid'}
@@ -287,11 +280,6 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/QueueFull'}
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      description: Optional; disabled by default on localhost and enabled with ServerApi.Auth.Enable.
   parameters:
     Guid:
       name: guid
@@ -413,7 +401,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
     Unauthorized:
-      description: Missing or invalid Bearer token when authentication is enabled
+      description: The configured authentication provider rejected the request
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}

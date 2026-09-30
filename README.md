@@ -13,8 +13,9 @@ registered module capabilities.
 Built-in endpoints cover health and readiness, server state and metrics,
 online players, the database-backed character catalog, groups, and active
 dungeon/raid instances. The module also provides a world-thread runtime
-snapshot, a bounded in-process EventBus, and optionally Bearer-protected
-`/ws/v1/events` with subscriptions and ping/pong.
+snapshot, a bounded in-process EventBus, and `/ws/v1/events` with subscriptions
+and ping/pong. Authentication is selected through a provider registry and
+defaults to `NoAuthProvider` on localhost; see [docs/auth.md](docs/auth.md).
 
 ## Installation
 
@@ -49,13 +50,9 @@ Default address:
 http://127.0.0.1:7878
 ```
 
-The listener is enabled by default on localhost without authentication.
-When Bearer authentication is enabled, versioned HTTP endpoints and WebSocket
-handshakes require:
-
-```http
-Authorization: Bearer <ServerApi.Auth.ApiKey>
-```
+The listener is enabled by default on localhost with
+`ServerApi.Auth.Provider = "none"`. The configured provider handles versioned
+HTTP endpoints and WebSocket handshakes; `/health` and `/ready` stay public.
 
 ### Health
 
@@ -70,8 +67,8 @@ These endpoints are public and intended for liveness/readiness probes.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/server` | Bearer when enabled |
-| `GET` | `/api/v1/server/metrics` | Bearer when enabled |
+| `GET` | `/api/v1/server` | configured provider |
+| `GET` | `/api/v1/server/metrics` | configured provider |
 
 `/api/v1/server` returns `realmId`, `serverTime`, `uptimeSeconds`,
 `playersOnline` and `botsOnline`.
@@ -83,10 +80,10 @@ These endpoints are public and intended for liveness/readiness probes.
 Example:
 
 ```bash
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   http://127.0.0.1:7878/api/v1/server
 
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   http://127.0.0.1:7878/api/v1/server/metrics
 ```
 
@@ -97,8 +94,8 @@ database-backed all-character catalog documented below.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/players` | Bearer when enabled |
-| `GET` | `/api/v1/players/{guid}` | Bearer when enabled |
+| `GET` | `/api/v1/players` | configured provider |
+| `GET` | `/api/v1/players/{guid}` | configured provider |
 
 Supported list query parameters:
 
@@ -111,10 +108,10 @@ Supported list query parameters:
 Example:
 
 ```bash
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   'http://127.0.0.1:7878/api/v1/players?limit=10&mapId=0'
 
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   http://127.0.0.1:7878/api/v1/players/123
 ```
 
@@ -150,8 +147,8 @@ details always hide deleted rows and return `404` for a deleted or missing GUID.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/characters` | Bearer when enabled |
-| `GET` | `/api/v1/characters/{guid}` | Bearer when enabled |
+| `GET` | `/api/v1/characters` | configured provider |
+| `GET` | `/api/v1/characters/{guid}` | configured provider |
 
 List parameters:
 
@@ -208,13 +205,13 @@ skill values. Bags, bank, mail and account credentials are not exposed.
 Examples:
 
 ```bash
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   'http://127.0.0.1:7878/api/v1/characters?limit=100&name=pap&online=false&minLevel=20'
 
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   'http://127.0.0.1:7878/api/v1/characters?limit=100&name=pap&cursor=123'
 
-curl -H 'Authorization: Bearer test-secret-key' \
+curl \
   'http://127.0.0.1:7878/api/v1/characters/123'
 ```
 
@@ -236,8 +233,8 @@ Each item contains `name`, `version` and a list of capability names.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/groups` | Bearer when enabled |
-| `GET` | `/api/v1/groups/{id}` | Bearer when enabled |
+| `GET` | `/api/v1/groups` | configured provider |
+| `GET` | `/api/v1/groups/{id}` | configured provider |
 
 Groups are collected from online players on the world thread. A group with no
 online player is not visible in this runtime snapshot. Each item contains
@@ -247,8 +244,8 @@ online player is not visible in this runtime snapshot. Each item contains
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/instances` | Bearer when enabled |
-| `GET` | `/api/v1/instances/{instanceId}` | Bearer when enabled |
+| `GET` | `/api/v1/instances` | configured provider |
+| `GET` | `/api/v1/instances/{instanceId}` | configured provider |
 
 The response contains active dungeon and raid maps only. Each item contains
 `instanceId`, `mapId`, `difficulty` and the current non-GM `players` count.
@@ -258,7 +255,7 @@ Persistent instance-save state and a `startedAt` timestamp are not exposed.
 
 | Method | Endpoint | Auth |
 |---|---|---|
-| `GET` | `/api/v1/bots` | Bearer when enabled |
+| `GET` | `/api/v1/bots` | configured provider |
 
 When `mod-playerbots` is compiled into the worldserver, the endpoint returns
 online bot players with the same basic fields as the player list. Without
@@ -274,7 +271,6 @@ The normal response is `202 Accepted`:
 
 ```bash
 curl -i -X POST \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/players/123/kick
 ```
 
@@ -288,7 +284,6 @@ it changes server state and can disconnect a real player.
 
 ```bash
 curl -i -X POST \
-  -H "Authorization: Bearer ${API_KEY}" \
   'http://127.0.0.1:7878/api/v1/players/123/teleport?mapId=0&x=-8949.95&y=-132.49&z=83.53&orientation=0'
 ```
 
@@ -300,9 +295,8 @@ Endpoint:
 ws://127.0.0.1:7878/ws/v1/events
 ```
 
-When authentication is enabled, the WebSocket handshake requires the same
-Bearer header. After connecting,
-send a compact JSON subscription message:
+The WebSocket handshake uses the configured authentication provider. After
+connecting, send a compact JSON subscription message:
 
 ```json
 {"type":"subscribe","events":["server.*","player.*","group.*","instance.*"]}
@@ -373,11 +367,12 @@ aggregator.
 | Status | Meaning |
 |---:|---|
 | `400` | Invalid request or command parameters |
-| `401` | Missing or invalid Bearer token when authentication is enabled |
+| `401` | Configured authentication provider rejected the request |
 | `404` | Unknown endpoint or character/player not found |
 | `405` | Known endpoint called with an unsupported method |
 | `413` | Request exceeds `ServerApi.MaxRequestBytes` |
 | `429` | Global HTTP request rate limit exceeded |
+| `500` | Authentication provider failed or returned an invalid result |
 | `501` | Optional integration is unavailable |
 | `503` | Character database/request capacity, command queue or WebSocket client limit reached |
 
@@ -390,56 +385,44 @@ curl -i http://127.0.0.1:7878/health
 curl -i http://127.0.0.1:7878/ready
 ```
 
-Проверка отказа без Bearer-токена:
+Проверка API с провайдером `none` по умолчанию:
 
 ```bash
 curl -i http://127.0.0.1:7878/api/v1/server
 curl -i http://127.0.0.1:7878/api/v1/players
 ```
 
-Запросы с авторизацией:
+Примеры запросов:
 
 ```bash
-API_KEY='test-secret-key'
-
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/server
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/server/metrics
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   'http://127.0.0.1:7878/api/v1/players?limit=10'
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   'http://127.0.0.1:7878/api/v1/players?name=Papas&mapId=0&limit=25'
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/players/123
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/groups
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/groups/123
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/instances
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/instances/1
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/bots
 ```
 
@@ -447,23 +430,18 @@ curl -i \
 
 ```bash
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   'http://127.0.0.1:7878/api/v1/players?mapId=invalid'
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   'http://127.0.0.1:7878/api/v1/players?limit=0'
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/players/999999999
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/groups/not-a-number
 
 curl -i \
-  -H "Authorization: Bearer ${API_KEY}" \
   http://127.0.0.1:7878/api/v1/instances/999999999
 ```
 
@@ -482,38 +460,31 @@ ServerApi.WebSocket.MaxFrameBytes = 1048576
 ServerApi.WebSocket.MaxSubscriptions = 100
 ServerApi.WebSocket.MaxQueue = 100
 ServerApi.WebSocket.MaxClients = 50
-ServerApi.Auth.Enable = 0
-ServerApi.Auth.ApiKey = ""
+ServerApi.Auth.Provider = "none"
 ```
 
-To enable Bearer authentication:
+To use a custom provider:
 
 ```ini
-ServerApi.Auth.Enable = 1
-ServerApi.Auth.ApiKey = "test-secret-key"
+ServerApi.Auth.Provider = "my-provider"
 ```
 
-To run the service without authentication on localhost:
+The provider must be registered by a compiled AzerothCore module before the API
+starts. Unknown provider names stop the listener. Non-local binds require a
+provider whose `RequiresAuthentication()` returns `true`; `none` is only
+allowed on loopback. The module does not provide TLS, so remote access should
+use a trusted TLS-terminating proxy or protected tunnel. Provider integration
+details are in [docs/auth.md](docs/auth.md). The former
+`ServerApi.Auth.Enable` and `ServerApi.Auth.ApiKey` settings are no longer read.
 
-```ini
-ServerApi.Enable = 1
-ServerApi.BindAddress = "127.0.0.1"
-ServerApi.Auth.Enable = 0
-ServerApi.Auth.ApiKey = ""
-```
-
-With `Auth.Enable = 0` (the default), REST and WebSocket endpoints accept
-requests without a Bearer header. Non-local bind addresses are still rejected
-without enabled Bearer authentication and a non-empty API key. Do not expose an
-unauthenticated listener outside localhost. On startup, the module logs the effective listener,
-authentication mode, limits and sampling intervals. `ServerApi.Auth.ApiKey` is
-never included in the startup summary.
+On startup, the module logs the selected provider name, listener, limits and
+sampling intervals. Provider secrets are not included in the startup summary.
 
 ## Testing
 
 The REST contract is also available as [docs/openapi.yaml](docs/openapi.yaml).
 
-Build and run the automatic EventBus unit tests:
+Build and run the automatic module unit tests:
 
 ```bash
 cmake -S /path/to/azerothcore-wotlk -B /path/to/azerothcore-wotlk/build \
@@ -526,7 +497,7 @@ ctest --test-dir /path/to/azerothcore-wotlk/build \
 Run API contract tests against a running worldserver:
 
 ```bash
-SERVER_API_KEY='test-secret-key' ./tests/test_api_contract.sh
+./tests/test_api_contract.sh
 ```
 
 For labelled manual curl checks, run:

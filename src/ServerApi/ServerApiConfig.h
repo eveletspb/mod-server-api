@@ -17,8 +17,7 @@ namespace ServerApi
         uint16_t port = 7878;
         uint32_t maxRequestBytes = 1024 * 1024;
         uint32_t maxRequestsPerSecond = 1000;
-        bool authEnabled = false;
-        std::string apiKey;
+        std::string authProvider = "none";
         bool webSocketEnabled = true;
         uint32_t maxWebSocketFrameBytes = 1024 * 1024;
         uint32_t maxWebSocketSubscriptions = 100;

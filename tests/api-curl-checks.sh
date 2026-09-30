@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 
 # Manual curl checks for mod-server-api.
-# Default mode matches a trusted localhost deployment with Auth.Enable = 0.
-# For authenticated mode set SERVER_API_KEY and use AUTH_HEADER below.
+# Default mode matches a trusted localhost deployment with provider "none".
 
 set -u
 
 BASE_URL="${SERVER_API_URL:-http://127.0.0.1:7878}"
-API_KEY="${SERVER_API_KEY:-}"
-AUTH_HEADER="Authorization: Bearer ${API_KEY}"
 
 echo "===== 1. Health check: liveness ====="
 curl -i "${BASE_URL}/health"
@@ -68,22 +65,13 @@ echo "===== 19. Invalid teleport command; safe, no state change, expected 400 ==
 curl -i -X POST \
   "${BASE_URL}/api/v1/players/1/teleport?mapId=bad&x=0&y=0&z=0&orientation=0"
 
-if [[ -n "${API_KEY}" ]]; then
-    echo "===== 20. Authenticated server request ====="
-    curl -i -H "${AUTH_HEADER}" "${BASE_URL}/api/v1/server"
-
-    echo "===== 21. Authenticated WebSocket upgrade request ====="
-    curl -i --http1.1 --max-time 3 \
-      -H "Connection: Upgrade" \
-      -H "Upgrade: websocket" \
-      -H "Sec-WebSocket-Version: 13" \
-      -H "Sec-WebSocket-Key: SGVsbG9XZWJTb2NrZXQ=" \
-      -H "${AUTH_HEADER}" \
-      "${BASE_URL}/ws/v1/events"
-else
-    echo "===== 20-21. Authenticated checks skipped ====="
-    echo "Set SERVER_API_KEY when ServerApi.Auth.Enable = 1."
-fi
+echo "===== 20. WebSocket upgrade with the configured provider ====="
+curl -i --http1.1 --max-time 3 \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: SGVsbG9XZWJTb2NrZXQ=" \
+  "${BASE_URL}/ws/v1/events"
 
 echo "===== WebSocket functional test ====="
 echo "Use a WebSocket client to send:"

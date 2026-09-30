@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 
 const baseUrl = process.env.SERVER_API_WS_URL || 'ws://127.0.0.1:7878/ws/v1/events';
-const apiKey = process.env.SERVER_API_KEY || '';
 const timeoutMs = Number(process.env.SERVER_API_WS_TIMEOUT_MS || 5000);
 
-const options = apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : undefined;
-const socket = new WebSocket(baseUrl, options);
+const socket = new WebSocket(baseUrl);
 let subscribed = false;
 let pong = false;
 let eventReceived = false;

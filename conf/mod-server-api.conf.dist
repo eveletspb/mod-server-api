@@ -18,8 +18,8 @@
 #
 ServerApi.Enable = 1
 
-# ServerApi.BindAddress defaults to localhost. Non-local binds are refused
-# unless Bearer authentication is enabled with a non-empty API key.
+# ServerApi.BindAddress defaults to localhost. Non-local binds require a
+# configured provider whose RequiresAuthentication() returns true.
 ServerApi.BindAddress = "127.0.0.1"
 
 # Requires restart after a change.
@@ -37,8 +37,6 @@ ServerApi.WebSocket.MaxSubscriptions = 100
 ServerApi.WebSocket.MaxQueue = 100
 ServerApi.WebSocket.MaxClients = 50
 
-# Bearer authentication is disabled by default for the localhost listener.
-# Enable it before changing BindAddress to a non-local address.
-ServerApi.Auth.Enable = 0
-# Required when Auth.Enable = 1. Do not commit a production key.
-ServerApi.Auth.ApiKey = ""
+# Authentication provider selected at startup. The built-in "none" provider
+# allows unauthenticated access on loopback addresses only.
+ServerApi.Auth.Provider = "none"

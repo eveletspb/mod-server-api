@@ -24,9 +24,9 @@ namespace
         std::string const request =
             "GET /api/v1/server HTTP/1.1\r\n"
             "Host: localhost\r\n"
-            "AUTHORIZATION:\tBearer secret  \r\n\r\n";
+            "X-Token:\tsecret  \r\n\r\n";
 
-        EXPECT_EQ(ServerApi::HeaderValue(request, "authorization"), "Bearer secret");
+        EXPECT_EQ(ServerApi::HeaderValue(request, "x-token"), "secret");
         EXPECT_TRUE(ServerApi::HeaderValue(request, "missing").empty());
     }
 

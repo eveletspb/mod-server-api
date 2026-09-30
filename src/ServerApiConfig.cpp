@@ -17,8 +17,7 @@ namespace ServerApi
         config.port = sConfigMgr->GetOption<uint16_t>("ServerApi.Port", 7878);
         config.maxRequestBytes = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestBytes", 1024 * 1024);
         config.maxRequestsPerSecond = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestsPerSecond", 1000);
-        config.authEnabled = sConfigMgr->GetOption<bool>("ServerApi.Auth.Enable", false);
-        config.apiKey = sConfigMgr->GetOption<std::string>("ServerApi.Auth.ApiKey", "");
+        config.authProvider = sConfigMgr->GetOption<std::string>("ServerApi.Auth.Provider", "none");
         config.webSocketEnabled = sConfigMgr->GetOption<bool>("ServerApi.WebSocket.Enable", true);
         config.maxWebSocketFrameBytes =
             sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxFrameBytes", 1024 * 1024);
@@ -56,20 +55,9 @@ namespace ServerApi
             config.enabled = false;
         }
 
-        if (config.bindAddress != "127.0.0.1" && config.bindAddress != "::1")
+        if (config.authProvider.empty())
         {
-            if (!config.authEnabled || config.apiKey.empty())
-            {
-                LOG_ERROR("server-api.config",
-                    "Refusing non-local bind {} without ServerApi.Auth.Enable and a non-empty API key",
-                    config.bindAddress);
-                config.enabled = false;
-            }
-        }
-
-        if (config.enabled && config.authEnabled && config.apiKey.empty())
-        {
-            LOG_ERROR("server-api.config", "ServerApi.Auth.ApiKey must be configured when the API is enabled");
+            LOG_ERROR("server-api.config", "ServerApi.Auth.Provider must not be empty");
             config.enabled = false;
         }
 

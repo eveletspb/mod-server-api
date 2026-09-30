@@ -3,16 +3,10 @@
 set -euo pipefail
 
 BASE_URL="${SERVER_API_URL:-http://127.0.0.1:7878}"
-API_KEY="${SERVER_API_KEY:-}"
 PLAYER_GUID="${SERVER_API_PLAYER_GUID:-}"
 PLAYERBOTS_ENABLED="${SERVER_API_PLAYERBOTS:-0}"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
-
-if [[ -z "$API_KEY" ]]; then
-    echo "SERVER_API_KEY is required" >&2
-    exit 2
-fi
 
 assert_response() {
     local name="$1"
@@ -42,49 +36,45 @@ assert_response() {
     echo "PASS: $name"
 }
 
-AUTH_HEADER="Authorization: Bearer $API_KEY"
-
 assert_response "health" 200 '"status":"ok"' \
     "$BASE_URL/health"
 assert_response "ready" 200 '"status":"ready"' \
     "$BASE_URL/ready"
 assert_response "health rejects POST" 405 'METHOD_NOT_ALLOWED' \
     -X POST "$BASE_URL/health"
-assert_response "missing auth" 401 'UNAUTHORIZED' \
-    "$BASE_URL/api/v1/server"
-assert_response "invalid auth" 401 'UNAUTHORIZED' \
-    -H 'Authorization: Bearer invalid' "$BASE_URL/api/v1/server"
 assert_response "server" 200 'playersOnline' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/server"
+    "$BASE_URL/api/v1/server"
 assert_response "metrics" 200 'activeMaps' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/server/metrics"
+    "$BASE_URL/api/v1/server/metrics"
 assert_response "players list" 200 '"data"' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/players?limit=10"
+    "$BASE_URL/api/v1/players?limit=10"
 assert_response "groups list" 200 '"data"' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/groups"
+    "$BASE_URL/api/v1/groups"
 assert_response "instances list" 200 '"data"' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/instances"
+    "$BASE_URL/api/v1/instances"
+assert_response "module namespace reaches routing" 404 'NOT_FOUND' \
+    "$BASE_URL/api/v1/mod/unregistered/route"
 if [[ "$PLAYERBOTS_ENABLED" == "1" ]]; then
     assert_response "bots endpoint" 200 '"data"' \
-        -H "$AUTH_HEADER" "$BASE_URL/api/v1/bots"
+        "$BASE_URL/api/v1/bots"
 else
     assert_response "bots unsupported" 501 'NOT_SUPPORTED' \
-        -H "$AUTH_HEADER" "$BASE_URL/api/v1/bots"
+        "$BASE_URL/api/v1/bots"
 fi
 assert_response "invalid map filter" 400 'INVALID_MAP_ID' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/players?mapId=invalid"
+    "$BASE_URL/api/v1/players?mapId=invalid"
 assert_response "invalid limit" 400 'INVALID_LIMIT' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/players?limit=0"
+    "$BASE_URL/api/v1/players?limit=0"
 assert_response "invalid group id" 400 'INVALID_GROUP_ID' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/groups/not-a-number"
+    "$BASE_URL/api/v1/groups/not-a-number"
 assert_response "missing instance" 404 'INSTANCE_NOT_FOUND' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/instances/999999999"
+    "$BASE_URL/api/v1/instances/999999999"
 assert_response "account API removed" 404 'NOT_FOUND' \
-    -H "$AUTH_HEADER" "$BASE_URL/api/v1/accounts/1"
+    "$BASE_URL/api/v1/accounts/1"
 
 if [[ -n "$PLAYER_GUID" ]]; then
     assert_response "player details" 200 '"position"' \
-        -H "$AUTH_HEADER" "$BASE_URL/api/v1/players/$PLAYER_GUID"
+        "$BASE_URL/api/v1/players/$PLAYER_GUID"
 else
     echo "SKIP: player details (set SERVER_API_PLAYER_GUID)"
 fi

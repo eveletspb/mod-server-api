@@ -7,6 +7,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/tests/TestHttpUtils.cpp"
             "${MOD_PATH}/tests/TestRequestRateLimiter.cpp"
             "${MOD_PATH}/tests/TestModuleRegistry.cpp"
+            "${MOD_PATH}/tests/TestAuthentication.cpp"
             "${MOD_PATH}/tests/TestCommandQueue.cpp"
         )
 

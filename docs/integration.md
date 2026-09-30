@@ -53,10 +53,11 @@ ServerApi::GetModuleRegistry().Register(
     });
 ```
 
-The handler is called on the API IO worker and must not access `Player*`,
+The handler is called on the API IO worker and receives the optional authenticated
+identity in `request.identity`. It must not access `Player*`,
 `Map*`, `WorldSession*` or other world objects. It may read a module-owned,
 thread-safe value snapshot. Mutations must enqueue a world-thread command and
-return `202 Accepted` only when the enqueue succeeds. Authentication, global
+return `202 Accepted` only when the enqueue succeeds. Provider-based authentication, global
 rate limiting and the `/api/v1/mod/<module>/...` namespace boundary are enforced by
 `mod-server-api`.
 
@@ -64,13 +65,34 @@ Handlers should return `std::nullopt` for paths they do not own. Exceptions are
 converted to a generic `500 MODULE_HANDLER_FAILED` response and are not allowed
 to escape into the API worker.
 
+## Registering an authentication provider
+
+An integration module can register a provider factory in the public registry
+before the API listener starts:
+
+```cpp
+#include "ServerApi/Authentication.h"
+
+ServerApi::GetAuthenticationProviderRegistry().Register("my-provider", []
+{
+    return std::make_unique<MyAuthenticationProvider>();
+});
+```
+
+Register during module initialization, not from an API request. The selected
+provider is named by `ServerApi.Auth.Provider`; provider-owned settings belong
+under `ServerApi.Auth.<provider-name>.*`. Providers run synchronously on the
+single API I/O worker and must use a fast local check. They cannot access
+world objects or perform blocking database/network calls. A provider used on a
+non-local bind must return `true` from `RequiresAuthentication()`.
+
 ## Adding a new REST read endpoint
 
 1. Collect data in `ServerSnapshot` on the world thread.
 2. Publish immutable snapshot storage under the snapshot mutex and copy DTOs
    only after releasing it.
 3. Serialize only the copied DTO in `ApiServer.cpp`.
-4. Apply Bearer validation, path/query validation and bounded payload rules.
+4. Rely on the shared authentication provider, then apply path/query validation and bounded payload rules.
 5. Update `README.md`, `docs/openapi.yaml` and `docs/project-context.md`.
 
 ## Adding a write operation

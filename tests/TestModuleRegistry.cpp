@@ -53,6 +53,28 @@ namespace
         EXPECT_FALSE(registry.Dispatch({"GET", "/api/v1/raid-runner/status", "/api/v1/raid-runner/status"}));
     }
 
+    TEST(ServerApiModuleRegistry, DispatchPassesAuthenticatedIdentity)
+    {
+        ServerApi::ModuleRegistry registry;
+        ASSERT_TRUE(registry.Register({"identity-check", "1.0.0", {"status"}},
+            [](ServerApi::ModuleApiRequest const& request)
+            {
+                EXPECT_TRUE(request.identity.has_value());
+                if (request.identity)
+                {
+                    EXPECT_EQ(request.identity->provider, "test-provider");
+                    EXPECT_EQ(request.identity->subject, "user-42");
+                }
+                return std::optional<ServerApi::ModuleApiResponse>{
+                    ServerApi::ModuleApiResponse{200, "OK", R"({"status":"ok"})", {}}};
+            }));
+
+        auto const response = registry.Dispatch({"GET", "/api/v1/mod/identity-check/status",
+            "/api/v1/mod/identity-check/status", ServerApi::AuthIdentity{"test-provider", "user-42"}});
+        ASSERT_TRUE(response.has_value());
+        EXPECT_EQ(response->status, 200);
+    }
+
     TEST(ServerApiModuleRegistry, ConvertsHandlerExceptionToSafeResponse)
     {
         ServerApi::ModuleRegistry registry;

@@ -5,6 +5,8 @@
 #ifndef SERVER_API_MODULE_REGISTRY_H_
 #define SERVER_API_MODULE_REGISTRY_H_
 
+#include "ServerApi/Authentication.h"
+
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -27,6 +29,7 @@ namespace ServerApi
         std::string method;
         std::string target;
         std::string path;
+        std::optional<AuthIdentity> identity;
     };
 
     struct ModuleApiResponse

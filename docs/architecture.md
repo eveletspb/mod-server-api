@@ -8,8 +8,8 @@ The current implementation contains:
 - `ServerApi::ApiServer`, a small Boost.Asio HTTP listener;
 - `ServerApi::EventBus`, a bounded asynchronous event queue;
 - local health endpoints: `GET /health` and `GET /ready`;
-- Runtime endpoints for server, online players, all current-realm characters, groups, instances and optional integrations, optionally protected by Bearer authentication;
-- WebSocket endpoint `GET /ws/v1/events` with subscriptions and ping/pong, optionally protected by Bearer authentication.
+- Runtime endpoints for server, online players, all current-realm characters, groups, instances and optional integrations, protected by the configured authentication provider;
+- WebSocket endpoint `GET /ws/v1/events` with subscriptions and ping/pong, protected by the same provider.
 
 Public headers live under `src/ServerApi/` because AzerothCore's automatic
 module integration exports include directories recursively from the module
@@ -53,11 +53,16 @@ handler under the registry lock and invokes it after releasing the lock, so a
 handler may not block registry operations or access world objects. Handler
 exceptions become a generic `500 MODULE_HANDLER_FAILED` response.
 
-The listener is enabled by default on `127.0.0.1`; Bearer authentication is
-disabled by default. Non-local binds require Bearer auth with a non-empty API
-key. Authorization scopes and RBAC are not implemented. Health endpoints remain
-unauthenticated for process probes; versioned endpoints return `401` without a
-valid `Authorization: Bearer <key>` header when Bearer auth is enabled.
+The listener is enabled by default on `127.0.0.1`; `ServerApi.Auth.Provider`
+defaults to `none`, which selects `NoAuthProvider`. Non-local binds require a
+provider whose `RequiresAuthentication()` returns true. Health endpoints remain
+public, while versioned REST and WebSocket requests pass through the configured
+provider. The provider receives a read-only request context and runs
+synchronously on the API I/O worker; it must not block or access world objects.
+Identity is passed to module API handlers and retained by WebSocket sessions.
+Authorization scopes and RBAC are not implemented. The listener does not
+provide TLS; remote access requires a trusted TLS-terminating proxy or protected
+tunnel.
 Sampling intervals can be reloaded while the server is running. Listener,
 authentication and request/WebSocket limit changes require a worldserver
 restart because active IO sessions own an immutable configuration copy.
@@ -114,8 +119,8 @@ builders because no project-wide JSON DTO dependency is selected.
 
 ## Boundaries for the next phases
 
-- Authentication, global rate limiting and versioned REST endpoints are implemented;
-  secret rotation and authorization scopes remain future work.
+- Provider-based authentication, global rate limiting and versioned REST endpoints are implemented;
+  provider-specific credential rotation and authorization scopes remain the responsibility of providers/future work.
 - General REST DTO serialization still needs a selected JSON/HTTP adapter;
   shared escaping and request helpers cover the current manual builders.
 - Runtime game-state reads use a world-thread snapshot; no raw core pointers cross into API workers. Character DB data is read asynchronously by the API-owned callback processor.

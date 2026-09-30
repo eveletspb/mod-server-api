@@ -5,6 +5,7 @@
 #ifndef SERVER_API_SERVER_H_
 #define SERVER_API_SERVER_H_
 
+#include "ServerApi/Authentication.h"
 #include "ServerApi/RequestRateLimiter.h"
 #include "ServerApi/ServerApiConfig.h"
 
@@ -41,6 +42,8 @@ namespace ServerApi
         boost::asio::io_context _ioContext;
         boost::asio::ip::tcp::acceptor _acceptor{_ioContext};
         Config _config;
+        std::shared_ptr<AuthenticationProvider> _authenticationProvider;
+        bool _authenticationRequired = false;
         std::shared_ptr<CharactersApi> _charactersApi;
         std::thread _thread;
         std::atomic_bool _running = false;
