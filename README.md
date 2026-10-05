@@ -350,7 +350,11 @@ Subscriptions use exact event names or a trailing wildcard such as `player.*`.
 Each WebSocket has a bounded outgoing queue; an overflowing connection is
 closed to protect the API worker.
 The total number of WebSocket clients is limited by
-`ServerApi.WebSocket.MaxClients` (default 50).
+`ServerApi.WebSocket.MaxClients` (default 10). The outgoing queue is capped by
+both message count and total bytes, including messages waiting for the API I/O
+worker, so slow clients cannot build an unbounded backlog.
+Incoming WebSocket messages are also limited per connection; clients exceeding
+`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10) are disconnected.
 
 Position sampling uses `ServerApi.PositionUpdates.IntervalMs` (default 1000 ms)
 and is performed from the world-thread snapshot. The module does not emit one
@@ -456,10 +460,12 @@ ServerApi.MaxRequestsPerSecond = 1000
 ServerApi.PositionUpdates.IntervalMs = 1000
 ServerApi.CombatSnapshot.IntervalMs = 2000
 ServerApi.WebSocket.Enable = 1
-ServerApi.WebSocket.MaxFrameBytes = 1048576
-ServerApi.WebSocket.MaxSubscriptions = 100
-ServerApi.WebSocket.MaxQueue = 100
-ServerApi.WebSocket.MaxClients = 50
+ServerApi.WebSocket.MaxFrameBytes = 16384
+ServerApi.WebSocket.MaxSubscriptions = 20
+ServerApi.WebSocket.MaxQueue = 32
+ServerApi.WebSocket.MaxQueueBytes = 262144
+ServerApi.WebSocket.MaxClients = 10
+ServerApi.WebSocket.MaxMessagesPerSecond = 10
 ServerApi.Auth.Provider = "none"
 ```
 
@@ -470,11 +476,13 @@ ServerApi.Auth.Provider = "my-provider"
 ```
 
 The provider must be registered by a compiled AzerothCore module before the API
-starts. Unknown provider names stop the listener. Non-local binds require a
-provider whose `RequiresAuthentication()` returns `true`; `none` is only
-allowed on loopback. The module does not provide TLS, so remote access should
-use a trusted TLS-terminating proxy or protected tunnel. Provider integration
-details are in [docs/auth.md](docs/auth.md). The former
+starts. Unknown provider names stop the listener. The listener can bind to a
+LAN or other non-loopback address with any provider. With `none`, all versioned
+API endpoints accept anonymous requests from any host that can reach the
+listener, so restrict access with your network security layer. The module does
+not provide TLS; use a trusted TLS-terminating proxy or protected tunnel when
+traffic crosses an untrusted network. Provider integration details are in
+[docs/auth.md](docs/auth.md). The former
 `ServerApi.Auth.Enable` and `ServerApi.Auth.ApiKey` settings are no longer read.
 
 On startup, the module logs the selected provider name, listener, limits and

@@ -54,15 +54,16 @@ handler may not block registry operations or access world objects. Handler
 exceptions become a generic `500 MODULE_HANDLER_FAILED` response.
 
 The listener is enabled by default on `127.0.0.1`; `ServerApi.Auth.Provider`
-defaults to `none`, which selects `NoAuthProvider`. Non-local binds require a
-provider whose `RequiresAuthentication()` returns true. Health endpoints remain
-public, while versioned REST and WebSocket requests pass through the configured
-provider. The provider receives a read-only request context and runs
-synchronously on the API I/O worker; it must not block or access world objects.
-Identity is passed to module API handlers and retained by WebSocket sessions.
-Authorization scopes and RBAC are not implemented. The listener does not
-provide TLS; remote access requires a trusted TLS-terminating proxy or protected
-tunnel.
+defaults to `none`, which selects `NoAuthProvider`. Any configured bind address
+is allowed regardless of provider. Health endpoints remain public, while
+versioned REST and WebSocket requests pass through the configured provider. With
+`none`, these requests are anonymous from any host that can reach the listener;
+owners must restrict external access through their network security layer. The
+provider receives a read-only request context and runs synchronously on the API
+I/O worker; it must not block or access world objects. Identity is passed to
+module API handlers and retained by WebSocket sessions. Authorization scopes
+and RBAC are not implemented. The listener does not provide TLS; use a trusted
+TLS-terminating proxy or protected tunnel across untrusted networks.
 Sampling intervals can be reloaded while the server is running. Listener,
 authentication and request/WebSocket limit changes require a worldserver
 restart because active IO sessions own an immutable configuration copy.
@@ -96,9 +97,10 @@ only serializes that copy. Vector copies happen after releasing the snapshot
 mutex, so HTTP serialization cannot hold the world thread on a large copy. Map
 and instance data are collected in one map traversal per refresh. EventBus
 uses separate queue and subscription mutexes, so world-thread publication does
-not wait for subscription matching. Callbacks are posted into the API IO context
-and each WebSocket has a bounded
-write queue. It does not pass `Player*`, `Map*`,
+not wait for subscription matching. Callbacks enqueue serialized messages under
+per-client message and byte limits before posting to the API IO context, so a
+slow client cannot create an unbounded executor backlog. Each WebSocket has a
+bounded write queue. It does not pass `Player*`, `Map*`,
 `Group*`, databases, or client sockets across the thread boundary.
 
 `CharactersApi` returns Character DB rows to the API IO worker through an

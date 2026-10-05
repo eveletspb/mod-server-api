@@ -18,8 +18,9 @@
 #
 ServerApi.Enable = 1
 
-# ServerApi.BindAddress defaults to localhost. Non-local binds require a
-# configured provider whose RequiresAuthentication() returns true.
+# ServerApi.BindAddress defaults to localhost. Set it to 0.0.0.0 or a LAN
+# interface address to accept connections from other hosts. With provider
+# "none", API endpoints allow anonymous access; secure the network yourself.
 ServerApi.BindAddress = "127.0.0.1"
 
 # Requires restart after a change.
@@ -32,11 +33,13 @@ ServerApi.PositionUpdates.IntervalMs = 1000
 ServerApi.CombatSnapshot.IntervalMs = 2000
 
 ServerApi.WebSocket.Enable = 1
-ServerApi.WebSocket.MaxFrameBytes = 1048576
-ServerApi.WebSocket.MaxSubscriptions = 100
-ServerApi.WebSocket.MaxQueue = 100
-ServerApi.WebSocket.MaxClients = 50
+ServerApi.WebSocket.MaxFrameBytes = 16384
+ServerApi.WebSocket.MaxSubscriptions = 20
+ServerApi.WebSocket.MaxQueue = 32
+ServerApi.WebSocket.MaxQueueBytes = 262144
+ServerApi.WebSocket.MaxClients = 10
+ServerApi.WebSocket.MaxMessagesPerSecond = 10
 
 # Authentication provider selected at startup. The built-in "none" provider
-# allows unauthenticated access on loopback addresses only.
+# allows unauthenticated access from any host that can reach the listener.
 ServerApi.Auth.Provider = "none"

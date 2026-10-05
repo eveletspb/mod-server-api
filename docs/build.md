@@ -49,9 +49,11 @@ curl -i http://127.0.0.1:7878/api/v1/server
 
 Чтобы использовать аутентификацию, зарегистрируйте C++ provider в
 скомпилированном модуле и задайте `ServerApi.Auth.Provider = "<name>"`.
-Неизвестный provider останавливает listener; non-local bind требует provider,
-который возвращает `RequiresAuthentication() == true`. Модуль не предоставляет
-TLS: удалённый доступ организуйте через доверенный TLS proxy или защищённый
+Неизвестный provider останавливает listener. Любой bind разрешён независимо от
+provider; с `none` versioned REST endpoints и WebSocket доступны анонимно всем
+хостам, достигающим listener. При внешнем bind ограничьте доступ firewall, VPN
+или другим сетевым security layer. Модуль не предоставляет TLS: для передачи
+трафика через недоверенную сеть используйте доверенный TLS proxy или защищённый
 tunnel. При изменении provider, bind или порта требуется перезапуск worldserver.
 
 Smoke-тест всех endpoints находится в `scripts/test-api.sh`:

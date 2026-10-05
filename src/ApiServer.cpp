@@ -19,12 +19,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <deque>
 #include <exception>
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -403,6 +405,19 @@ namespace ServerApi
 
             void HandleMessage(std::string const& message)
             {
+                auto const now = std::chrono::steady_clock::now();
+                if (now - _messageWindowStart >= std::chrono::seconds(1))
+                {
+                    _messageWindowStart = now;
+                    _messagesInWindow = 0;
+                }
+                if (_messagesInWindow >= _config.maxWebSocketMessagesPerSecond)
+                {
+                    RequestClose();
+                    return;
+                }
+                ++_messagesInWindow;
+
                 if (message.find(R"("type":"ping")") != std::string::npos)
                 {
                     Enqueue(R"({"type":"pong"})");
@@ -440,12 +455,7 @@ namespace ServerApi
                     _subscriptions.push_back(GetEventBus().Subscribe(pattern, [weakSelf](ApiEvent const& event)
                     {
                         if (auto self = weakSelf.lock())
-                        {
-                            boost::asio::post(self->_socket.get_executor(), [self, event]
-                            {
-                                self->Enqueue(self->SerializeEvent(event));
-                            });
-                        }
+                            self->Enqueue(self->SerializeEvent(event));
                     }));
                 }
                 response += "]}";
@@ -471,16 +481,53 @@ namespace ServerApi
 
             void Enqueue(std::string message)
             {
-                if (message.size() > _config.maxWebSocketFrameBytes || _writeQueue.size() >= _config.maxWebSocketQueue)
+                if (message.size() > _config.maxWebSocketFrameBytes)
                 {
-                    Close();
+                    RequestClose();
                     return;
                 }
 
-                bool const wasEmpty = _writeQueue.empty();
-                _writeQueue.push_back(std::move(message));
-                if (wasEmpty)
-                    WriteNext();
+                bool overflow = false;
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    if (_closeRequested)
+                        return;
+
+                    if (_pendingMessages >= _config.maxWebSocketQueue ||
+                        message.size() > _config.maxWebSocketQueueBytes - _pendingBytes)
+                    {
+                        _closeRequested = true;
+                        overflow = true;
+                    }
+                    else
+                    {
+                        ++_pendingMessages;
+                        _pendingBytes += message.size();
+                    }
+                }
+
+                auto self = shared_from_this();
+                if (overflow)
+                {
+                    boost::asio::post(_socket.get_executor(), [self]
+                    {
+                        self->CloseOnExecutor();
+                    });
+                    return;
+                }
+
+                boost::asio::post(_socket.get_executor(), [self, message = std::move(message)]() mutable
+                {
+                    if (self->_closed)
+                    {
+                        self->ReleaseMessage(message.size());
+                        return;
+                    }
+
+                    self->_writeQueue.push_back(std::move(message));
+                    if (!self->_writeInProgress)
+                        self->WriteNext();
+                });
             }
 
             void WriteNext()
@@ -488,16 +535,76 @@ namespace ServerApi
                 if (_writeQueue.empty())
                     return;
 
+                _writeInProgress = true;
                 _socket.text(true);
                 auto self = shared_from_this();
                 _socket.async_write(boost::asio::buffer(_writeQueue.front()),
                     [self](boost::system::error_code error, std::size_t)
                 {
                     if (error)
+                    {
+                        self->_writeInProgress = false;
+                        self->CloseOnExecutor();
                         return;
+                    }
+
+                    std::size_t const messageBytes = self->_writeQueue.front().size();
                     self->_writeQueue.pop_front();
+                    self->ReleaseMessage(messageBytes);
+                    self->_writeInProgress = false;
+                    if (self->_closed)
+                    {
+                        self->DiscardWriteQueue();
+                        return;
+                    }
                     self->WriteNext();
                 });
+            }
+
+            void RequestClose()
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    if (_closeRequested)
+                        return;
+                    _closeRequested = true;
+                }
+
+                auto self = shared_from_this();
+                boost::asio::post(_socket.get_executor(), [self]
+                {
+                    self->CloseOnExecutor();
+                });
+            }
+
+            void CloseOnExecutor()
+            {
+                if (_closed)
+                    return;
+
+                _closed = true;
+                ClearSubscriptions();
+                boost::system::error_code ignored;
+                _socket.close(boost::beast::websocket::close_code::going_away, ignored);
+                if (!_writeInProgress)
+                    DiscardWriteQueue();
+            }
+
+            void ReleaseMessage(std::size_t messageBytes)
+            {
+                std::lock_guard<std::mutex> lock(_outboundMutex);
+                --_pendingMessages;
+                _pendingBytes -= messageBytes;
+            }
+
+            void DiscardWriteQueue()
+            {
+                while (!_writeQueue.empty())
+                {
+                    std::size_t const messageBytes = _writeQueue.front().size();
+                    _writeQueue.pop_front();
+                    ReleaseMessage(messageBytes);
+                }
             }
 
             void ClearSubscriptions()
@@ -507,18 +614,19 @@ namespace ServerApi
                 _subscriptions.clear();
             }
 
-            void Close()
-            {
-                ClearSubscriptions();
-                boost::system::error_code ignored;
-                _socket.close(boost::beast::websocket::close_code::going_away, ignored);
-            }
-
             boost::beast::websocket::stream<boost::asio::ip::tcp::socket> _socket;
             Config _config;
             boost::beast::flat_buffer _readBuffer;
             std::vector<SubscriptionId> _subscriptions;
             std::deque<std::string> _writeQueue;
+            std::mutex _outboundMutex;
+            std::size_t _pendingMessages = 0;
+            std::size_t _pendingBytes = 0;
+            bool _closeRequested = false;
+            bool _writeInProgress = false;
+            bool _closed = false;
+            std::chrono::steady_clock::time_point _messageWindowStart = std::chrono::steady_clock::now();
+            uint32_t _messagesInWindow = 0;
             std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
             std::optional<AuthIdentity> _identity;
         };
@@ -1009,14 +1117,6 @@ namespace ServerApi
         if (error)
         {
             LOG_ERROR("server-api.http", "Invalid bind address {}: {}", _config.bindAddress, error.message());
-            _running = false;
-            return false;
-        }
-
-        if (!IsAuthenticationProviderAllowedForBind(authenticationRequired, address.is_loopback()))
-        {
-            LOG_ERROR("server-api.config", "Refusing non-local bind {} with provider {} that allows anonymous access",
-                _config.bindAddress, _config.authProvider);
             _running = false;
             return false;
         }

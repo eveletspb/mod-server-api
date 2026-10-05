@@ -58,9 +58,6 @@ namespace ServerApi
             AuthenticationRequest const& request) const = 0;
     };
 
-    [[nodiscard]] bool IsAuthenticationProviderAllowedForBind(
-        bool providerRequiresAuthentication, bool isLoopbackAddress);
-
     class NoAuthProvider final : public AuthenticationProvider
     {
     public:

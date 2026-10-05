@@ -66,11 +66,6 @@ namespace ServerApi
         return AuthenticationResult::AllowAnonymous();
     }
 
-    bool IsAuthenticationProviderAllowedForBind(bool providerRequiresAuthentication, bool isLoopbackAddress)
-    {
-        return isLoopbackAddress || providerRequiresAuthentication;
-    }
-
     AuthenticationProviderRegistry::AuthenticationProviderRegistry()
     {
         _providers.emplace_back("none", []

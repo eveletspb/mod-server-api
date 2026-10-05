@@ -57,7 +57,13 @@ Current events:
 do not represent every movement packet or damage event.
 
 The recommended load-test baseline is 10 WebSocket clients. The listener
-rejects new connections after `ServerApi.WebSocket.MaxClients` is reached.
+rejects new connections after `ServerApi.WebSocket.MaxClients` is reached
+(default 10). Each client's outgoing backlog is bounded by both message count
+and total bytes, including messages waiting for the API I/O worker. A slow
+client is disconnected when either limit is reached.
+Incoming control messages are limited per connection by
+`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10); clients exceeding the
+limit are disconnected.
 
 Telemetry events have lower priority under EventBus backpressure and may be
 dropped when the bounded queue is full. Lifecycle and control events keep the

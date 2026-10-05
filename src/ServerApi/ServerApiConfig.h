@@ -19,10 +19,12 @@ namespace ServerApi
         uint32_t maxRequestsPerSecond = 1000;
         std::string authProvider = "none";
         bool webSocketEnabled = true;
-        uint32_t maxWebSocketFrameBytes = 1024 * 1024;
-        uint32_t maxWebSocketSubscriptions = 100;
-        uint32_t maxWebSocketQueue = 100;
-        uint32_t maxWebSocketClients = 50;
+        uint32_t maxWebSocketFrameBytes = 16 * 1024;
+        uint32_t maxWebSocketSubscriptions = 20;
+        uint32_t maxWebSocketQueue = 32;
+        uint32_t maxWebSocketQueueBytes = 256 * 1024;
+        uint32_t maxWebSocketClients = 10;
+        uint32_t maxWebSocketMessagesPerSecond = 10;
         uint32_t positionUpdatesIntervalMs = 1000;
         uint32_t combatSnapshotIntervalMs = 2000;
     };

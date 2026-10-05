@@ -69,17 +69,6 @@ namespace
         EXPECT_EQ(rejected.challenge, "Test realm=\"server-api\"");
     }
 
-    TEST(ServerApiAuthentication, NonLocalBindRequiresAuthentication)
-    {
-        ServerApi::NoAuthProvider noAuthProvider;
-        TestAuthenticationProvider authenticatedProvider;
-
-        EXPECT_TRUE(ServerApi::IsAuthenticationProviderAllowedForBind(noAuthProvider.RequiresAuthentication(), true));
-        EXPECT_FALSE(ServerApi::IsAuthenticationProviderAllowedForBind(noAuthProvider.RequiresAuthentication(), false));
-        EXPECT_TRUE(ServerApi::IsAuthenticationProviderAllowedForBind(
-            authenticatedProvider.RequiresAuthentication(), false));
-    }
-
     TEST(ServerApiAuthentication, RequestHeaderLookupIsCaseInsensitive)
     {
         ServerApi::AuthenticationRequest request;

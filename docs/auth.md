@@ -48,8 +48,12 @@ The selected provider authenticates all versioned REST requests, including
 provider may supply a `WWW-Authenticate` challenge.
 
 Unknown or unregistered provider names prevent the listener from starting.
-Non-local bind addresses also require a selected provider whose
-`RequiresAuthentication()` returns `true`; `NoAuthProvider` is local-only.
+The listener may bind to any configured address regardless of the selected
+provider. With `NoAuthProvider`, all versioned REST endpoints and WebSocket
+connections are anonymous, including on LAN and other non-loopback interfaces;
+any host that can reach the listener can use them. The default bind remains
+`127.0.0.1`. If you choose a wider bind without an authenticating provider,
+restrict access through your firewall, VPN, or another network security layer.
 Changing the provider or listener requires a worldserver restart.
 The former `ServerApi.Auth.Enable` and `ServerApi.Auth.ApiKey` settings are no
 longer read; replace them with a registered provider name.

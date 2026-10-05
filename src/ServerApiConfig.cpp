@@ -20,10 +20,15 @@ namespace ServerApi
         config.authProvider = sConfigMgr->GetOption<std::string>("ServerApi.Auth.Provider", "none");
         config.webSocketEnabled = sConfigMgr->GetOption<bool>("ServerApi.WebSocket.Enable", true);
         config.maxWebSocketFrameBytes =
-            sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxFrameBytes", 1024 * 1024);
-        config.maxWebSocketSubscriptions = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxSubscriptions", 100);
-        config.maxWebSocketQueue = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxQueue", 100);
-        config.maxWebSocketClients = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxClients", 50);
+            sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxFrameBytes", 16 * 1024);
+        config.maxWebSocketSubscriptions = sConfigMgr->GetOption<uint32_t>(
+            "ServerApi.WebSocket.MaxSubscriptions", 20);
+        config.maxWebSocketQueue = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxQueue", 32);
+        config.maxWebSocketQueueBytes = sConfigMgr->GetOption<uint32_t>(
+            "ServerApi.WebSocket.MaxQueueBytes", 256 * 1024);
+        config.maxWebSocketClients = sConfigMgr->GetOption<uint32_t>("ServerApi.WebSocket.MaxClients", 10);
+        config.maxWebSocketMessagesPerSecond = sConfigMgr->GetOption<uint32_t>(
+            "ServerApi.WebSocket.MaxMessagesPerSecond", 10);
         config.positionUpdatesIntervalMs =
             sConfigMgr->GetOption<uint32_t>("ServerApi.PositionUpdates.IntervalMs", 1000);
         config.combatSnapshotIntervalMs = sConfigMgr->GetOption<uint32_t>("ServerApi.CombatSnapshot.IntervalMs", 2000);
@@ -48,10 +53,10 @@ namespace ServerApi
 
         if (config.webSocketEnabled && (config.maxWebSocketFrameBytes == 0 ||
             config.maxWebSocketSubscriptions == 0 || config.maxWebSocketQueue == 0 ||
-            config.maxWebSocketClients == 0))
+            config.maxWebSocketQueueBytes == 0 ||
+            config.maxWebSocketClients == 0 || config.maxWebSocketMessagesPerSecond == 0))
         {
-            LOG_ERROR("server-api.config",
-                "WebSocket frame, subscription, queue and client limits must be greater than zero");
+            LOG_ERROR("server-api.config", "WebSocket limits must be greater than zero");
             config.enabled = false;
         }
 

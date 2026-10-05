@@ -83,8 +83,9 @@ Register during module initialization, not from an API request. The selected
 provider is named by `ServerApi.Auth.Provider`; provider-owned settings belong
 under `ServerApi.Auth.<provider-name>.*`. Providers run synchronously on the
 single API I/O worker and must use a fast local check. They cannot access
-world objects or perform blocking database/network calls. A provider used on a
-non-local bind must return `true` from `RequiresAuthentication()`.
+world objects or perform blocking database/network calls. The listener allows
+any bind address with any provider; when `none` is selected, callers are
+anonymous and network access must be restricted by the server owner.
 
 ## Adding a new REST read endpoint
 

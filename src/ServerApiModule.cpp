@@ -93,9 +93,12 @@ namespace
             config.maxRequestBytes, config.maxRequestsPerSecond);
         LOG_INFO("server.loading", ">> WebSocket: {}", config.webSocketEnabled ? "enabled" : "disabled");
         if (config.webSocketEnabled)
-            LOG_INFO("server.loading", ">> WebSocket limits: frame={} bytes, subscriptions={}, queue={}, clients={}",
+            LOG_INFO("server.loading",
+                ">> WebSocket limits: frame={} bytes, subscriptions={}, "
+                "queue={} messages/{} bytes, clients={}, inbound={}/s",
                 config.maxWebSocketFrameBytes, config.maxWebSocketSubscriptions, config.maxWebSocketQueue,
-                config.maxWebSocketClients);
+                config.maxWebSocketQueueBytes, config.maxWebSocketClients,
+                config.maxWebSocketMessagesPerSecond);
 
         LOG_INFO("server.loading", ">> Sampling: position={} ms, combat={} ms",
             config.positionUpdatesIntervalMs, config.combatSnapshotIntervalMs);
