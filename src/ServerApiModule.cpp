@@ -92,13 +92,18 @@ namespace
         LOG_INFO("server.loading", ">> HTTP limits: request={} bytes, rate={}/s (0 = unlimited)",
             config.maxRequestBytes, config.maxRequestsPerSecond);
         LOG_INFO("server.loading", ">> WebSocket: {}", config.webSocketEnabled ? "enabled" : "disabled");
+        LOG_INFO("server.loading", ">> SSE: {}", config.sseEnabled ? "enabled" : "disabled");
+        if (config.sseEnabled)
+            LOG_INFO("server.loading", ">> SSE limits: subscriptions={}, queue={} messages/{} bytes, clients={}, heartbeat={} s",
+                config.maxSseSubscriptions, config.maxSseQueue, config.maxSseQueueBytes, config.maxSseClients,
+                config.sseHeartbeatSeconds);
         if (config.webSocketEnabled)
             LOG_INFO("server.loading",
                 ">> WebSocket limits: frame={} bytes, subscriptions={}, "
-                "queue={} messages/{} bytes, clients={}, inbound={}/s",
+                "queue={} messages/{} bytes, clients={}, inbound={}/s, publishQueue={}",
                 config.maxWebSocketFrameBytes, config.maxWebSocketSubscriptions, config.maxWebSocketQueue,
                 config.maxWebSocketQueueBytes, config.maxWebSocketClients,
-                config.maxWebSocketMessagesPerSecond);
+                config.maxWebSocketMessagesPerSecond, config.maxWebSocketPublishQueue);
 
         LOG_INFO("server.loading", ">> Sampling: position={} ms, combat={} ms",
             config.positionUpdatesIntervalMs, config.combatSnapshotIntervalMs);
@@ -143,6 +148,7 @@ namespace
             ServerApi::GetModuleRegistry().Register({
                 "server-api", ServerApiVersion, {"server", "runtime", "characters", "commands", "events"}});
 
+            ServerApi::GetEventBus().SetMaxQueueSize(_config.maxWebSocketPublishQueue);
             ServerApi::GetEventBus().Start();
             if (!_server.Start(_config))
             {

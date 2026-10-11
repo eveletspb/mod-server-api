@@ -11,6 +11,10 @@
 #include "Realm.h"
 #include "WorldSessionMgr.h"
 
+#ifdef MOD_PLAYERBOTS
+#include "Bot/PlayerbotMgr.h"
+#endif
+
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -113,7 +117,9 @@ namespace ServerApi
             if (WorldSession* session = player->GetSession())
             {
                 playerSnapshot.accountId = session->GetAccountId();
-                playerSnapshot.bot = session->IsBot();
+#ifdef MOD_PLAYERBOTS
+                playerSnapshot.bot = sPlayerbotsMgr.GetPlayerbotAI(player) != nullptr;
+#endif
             }
             if (playerSnapshot.bot)
                 ++updated.botsOnline;

@@ -6,7 +6,7 @@ const timeoutMs = Number(process.env.SERVER_API_WS_TIMEOUT_MS || 5000);
 const socket = new WebSocket(baseUrl);
 let subscribed = false;
 let pong = false;
-let eventReceived = false;
+let publishedEventReceived = false;
 let finished = false;
 
 function fail(message) {
@@ -18,9 +18,9 @@ function fail(message) {
 }
 
 function finish() {
-    if (finished || !subscribed || !pong) return;
+    if (finished || !subscribed || !pong || !publishedEventReceived) return;
     finished = true;
-    console.log(`PASS: WebSocket subscribe/pong${eventReceived ? ' and event JSON' : ''}`);
+    console.log('PASS: WebSocket subscribe/pong/publish and event JSON');
     socket.close();
     process.exit(0);
 }
@@ -28,14 +28,19 @@ function finish() {
 const timer = setTimeout(() => {
     if (!subscribed || !pong)
         return fail('subscribe/pong did not complete before timeout');
-    if (!eventReceived)
-        console.log('INFO: no telemetry event received during timeout; control protocol is valid');
+    if (!publishedEventReceived)
+        return fail('published event was not received before timeout');
     finish();
 }, timeoutMs);
 
 socket.onopen = () => {
-    socket.send(JSON.stringify({ type: 'subscribe', events: ['player.position', 'combat.snapshot'] }));
+    socket.send(JSON.stringify({ type: 'subscribe', events: ['provider.smoke'] }));
     socket.send(JSON.stringify({ type: 'ping' }));
+    socket.send(JSON.stringify({
+        type: 'publish',
+        event: 'provider.smoke',
+        data: { source: 'test-websocket.js' },
+    }));
 };
 
 socket.onmessage = (message) => {
@@ -48,17 +53,17 @@ socket.onmessage = (message) => {
     }
 
     if (payload.type === 'subscribed') {
-        subscribed = Array.isArray(payload.events) && payload.events.includes('player.position');
+        subscribed = Array.isArray(payload.events) && payload.events.includes('provider.smoke');
     } else if (payload.type === 'pong') {
         pong = true;
-    } else if (payload.type === 'player.position' || payload.type === 'combat.snapshot') {
-        eventReceived = payload.version === 1 && typeof payload.data === 'object';
-        if (!eventReceived)
+    } else if (payload.type === 'provider.smoke') {
+        publishedEventReceived = payload.version === 1 &&
+            payload.data?.source === 'test-websocket.js';
+        if (!publishedEventReceived)
             fail(`invalid event envelope: ${JSON.stringify(payload)}`);
     }
 
-    if (eventReceived)
-        finish();
+    finish();
 };
 
 socket.onerror = () => fail('WebSocket connection failed');

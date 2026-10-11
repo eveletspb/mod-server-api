@@ -17,10 +17,17 @@ contract as REST endpoints.
 {"type":"subscribe","events":["player.*","instance.*"]}
 {"type":"unsubscribe"}
 {"type":"ping"}
+{"type":"publish","event":"provider.metric","data":{"name":"cpu","value":"42"}}
 ```
 
 Supported patterns are exact event names and trailing wildcards such as
 `player.*`. Each WebSocket has a bounded outgoing queue.
+Authenticated WebSocket clients may publish events. The event name is limited
+to 128 bytes and `data` must be an object containing string values. Published
+events are delivered to matching subscribers using the normal event envelope.
+The server parses publications on four worker threads and publishes them in the
+order they were accepted from WebSocket reads. Delivery is fire-and-forget; the
+server does not acknowledge receipt or replay missed events.
 
 ## Event envelope
 
@@ -61,9 +68,13 @@ rejects new connections after `ServerApi.WebSocket.MaxClients` is reached
 (default 10). Each client's outgoing backlog is bounded by both message count
 and total bytes, including messages waiting for the API I/O worker. A slow
 client is disconnected when either limit is reached.
-Incoming control messages are limited per connection by
-`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10); clients exceeding the
-limit are disconnected.
+Incoming WebSocket messages are limited per connection by
+`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10,000); clients exceeding
+the limit are disconnected. The publication queue and EventBus are bounded by
+`ServerApi.WebSocket.MaxPublishQueue` (default 10,000). New publications are
+dropped when the queue is full. The `/api/v1/server/metrics` response exposes
+`webSocketPublishQueue`, `webSocketPublishDropped` and
+`webSocketPublishInvalid` for monitoring.
 
 Telemetry events have lower priority under EventBus backpressure and may be
 dropped when the bounded queue is full. Lifecycle and control events keep the

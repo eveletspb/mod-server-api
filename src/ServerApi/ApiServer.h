@@ -19,6 +19,7 @@
 namespace ServerApi
 {
     class CharactersApi;
+    class WebSocketPublishPool;
 
     class ApiServer
     {
@@ -45,9 +46,11 @@ namespace ServerApi
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
         std::shared_ptr<CharactersApi> _charactersApi;
+        std::shared_ptr<WebSocketPublishPool> _webSocketPublishPool;
         std::thread _thread;
         std::atomic_bool _running = false;
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients = std::make_shared<std::atomic_uint32_t>(0);
+        std::shared_ptr<std::atomic_uint32_t> _sseClients = std::make_shared<std::atomic_uint32_t>(0);
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter = std::make_shared<RequestRateLimiter>();
     };
 }

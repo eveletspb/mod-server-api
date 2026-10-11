@@ -9,6 +9,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/tests/TestModuleRegistry.cpp"
             "${MOD_PATH}/tests/TestAuthentication.cpp"
             "${MOD_PATH}/tests/TestCommandQueue.cpp"
+            "${MOD_PATH}/tests/TestWebSocketPublishPool.cpp"
         )
 
         target_link_libraries(server_api_tests

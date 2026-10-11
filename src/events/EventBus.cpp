@@ -60,6 +60,12 @@ namespace ServerApi
         _queue.clear();
     }
 
+    void EventBus::SetMaxQueueSize(std::size_t maxQueueSize)
+    {
+        std::lock_guard<std::mutex> lock(_queueMutex);
+        _maxQueueSize = maxQueueSize;
+    }
+
     bool EventBus::Publish(ApiEvent event)
     {
         std::lock_guard<std::mutex> lock(_queueMutex);

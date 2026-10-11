@@ -308,6 +308,7 @@ Supported client messages:
 {"type":"subscribe","events":["player.*"]}
 {"type":"unsubscribe"}
 {"type":"ping"}
+{"type":"publish","event":"provider.metric","data":{"name":"cpu","value":"42"}}
 ```
 
 The server responds with `subscribed`, `unsubscribed` or `pong`. Event messages
@@ -351,10 +352,48 @@ Each WebSocket has a bounded outgoing queue; an overflowing connection is
 closed to protect the API worker.
 The total number of WebSocket clients is limited by
 `ServerApi.WebSocket.MaxClients` (default 10). The outgoing queue is capped by
-both message count and total bytes, including messages waiting for the API I/O
-worker, so slow clients cannot build an unbounded backlog.
-Incoming WebSocket messages are also limited per connection; clients exceeding
-`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10) are disconnected.
+both message count (default 256) and total bytes (default 2 MiB), including
+messages waiting for the API I/O worker, so brief client read stalls have more
+buffering headroom without allowing an unbounded backlog.
+Incoming WebSocket messages are limited per connection; clients exceeding
+`ServerApi.WebSocket.MaxMessagesPerSecond` (default 10,000) are disconnected.
+Authenticated clients can publish events with the `publish` message. Four
+worker threads parse publications and hand them to the EventBus in accepted
+order. Delivery is fire-and-forget; when the bounded queue is full, new
+publications are dropped. `ServerApi.WebSocket.MaxPublishQueue` controls the
+publication and EventBus queue capacity (default 10,000). Publication queue,
+drop and invalid-message counts are included in `/api/v1/server/metrics`.
+
+### Server-Sent Events
+
+The same EventBus is also available as a one-way SSE stream. Its event patterns
+and JSON envelope match WebSocket. Pass comma-separated patterns in `events`:
+
+```text
+GET /sse/v1/events?events=server.*,player.*
+```
+
+Each SSE `data:` field contains the same JSON event object shown above. The
+server sends a comment heartbeat every 15 seconds. Reconnecting clients receive
+new events only; the API does not persist or replay missed events. Slow clients
+have a bounded per-connection queue and are disconnected when it fills. SSE
+limits are independent from WebSocket:
+
+```ini
+ServerApi.SSE.Enable = 1
+ServerApi.SSE.MaxSubscriptions = 20
+ServerApi.SSE.MaxQueue = 256
+ServerApi.SSE.MaxQueueBytes = 2097152
+ServerApi.SSE.MaxClients = 10
+ServerApi.SSE.HeartbeatSeconds = 15
+```
+
+The endpoint uses the configured API authentication provider. Inspect a local
+stream with `curl -N`:
+
+```bash
+curl -N 'http://127.0.0.1:7878/sse/v1/events?events=server.*,player.*'
+```
 
 Position sampling uses `ServerApi.PositionUpdates.IntervalMs` (default 1000 ms)
 and is performed from the world-thread snapshot. The module does not emit one
@@ -462,10 +501,17 @@ ServerApi.CombatSnapshot.IntervalMs = 2000
 ServerApi.WebSocket.Enable = 1
 ServerApi.WebSocket.MaxFrameBytes = 16384
 ServerApi.WebSocket.MaxSubscriptions = 20
-ServerApi.WebSocket.MaxQueue = 32
-ServerApi.WebSocket.MaxQueueBytes = 262144
+ServerApi.WebSocket.MaxQueue = 256
+ServerApi.WebSocket.MaxQueueBytes = 2097152
 ServerApi.WebSocket.MaxClients = 10
-ServerApi.WebSocket.MaxMessagesPerSecond = 10
+ServerApi.WebSocket.MaxMessagesPerSecond = 10000
+ServerApi.WebSocket.MaxPublishQueue = 10000
+ServerApi.SSE.Enable = 1
+ServerApi.SSE.MaxSubscriptions = 20
+ServerApi.SSE.MaxQueue = 256
+ServerApi.SSE.MaxQueueBytes = 2097152
+ServerApi.SSE.MaxClients = 10
+ServerApi.SSE.HeartbeatSeconds = 15
 ServerApi.Auth.Provider = "none"
 ```
 
@@ -520,8 +566,8 @@ Run the WebSocket protocol smoke test with Node.js 22+:
 node ./tests/test-websocket.js
 ```
 
-The test validates the handshake, `subscribe`, `ping/pong` and JSON event
-envelopes when a telemetry event is produced during the timeout.
+The test validates the handshake, `subscribe`, `ping/pong`, publication and the
+JSON event envelope.
 
 Run a read-only REST load smoke test:
 
@@ -542,6 +588,17 @@ node ./tests/load-websocket.js
 ```
 
 The client count must not exceed `ServerApi.WebSocket.MaxClients`.
+
+Measure WebSocket publication throughput and end-to-end latency:
+
+```bash
+SERVER_API_WS_PUBLISH_RATE=10000 \
+SERVER_API_WS_DURATION_MS=5000 \
+node ./tests/load-websocket-publish.js
+```
+
+The output includes sent/received counts, measured send rate, latency percentiles
+and publication queue metrics when the metrics endpoint is accessible.
 
 After rebuilding with the client limit enabled, verify rejection above the
 limit:

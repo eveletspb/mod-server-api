@@ -35,10 +35,19 @@ ServerApi.CombatSnapshot.IntervalMs = 2000
 ServerApi.WebSocket.Enable = 1
 ServerApi.WebSocket.MaxFrameBytes = 16384
 ServerApi.WebSocket.MaxSubscriptions = 20
-ServerApi.WebSocket.MaxQueue = 32
-ServerApi.WebSocket.MaxQueueBytes = 262144
+ServerApi.WebSocket.MaxQueue = 256
+ServerApi.WebSocket.MaxQueueBytes = 2097152
 ServerApi.WebSocket.MaxClients = 10
-ServerApi.WebSocket.MaxMessagesPerSecond = 10
+ServerApi.WebSocket.MaxMessagesPerSecond = 10000
+ServerApi.WebSocket.MaxPublishQueue = 10000
+
+# Server-Sent Events
+ServerApi.SSE.Enable = 1
+ServerApi.SSE.MaxSubscriptions = 20
+ServerApi.SSE.MaxQueue = 256
+ServerApi.SSE.MaxQueueBytes = 2097152
+ServerApi.SSE.MaxClients = 10
+ServerApi.SSE.HeartbeatSeconds = 15
 
 # Authentication provider selected at startup. The built-in "none" provider
 # allows unauthenticated access from any host that can reach the listener.

@@ -47,6 +47,7 @@ namespace ServerApi
 
         void Start();
         void Stop();
+        void SetMaxQueueSize(std::size_t maxQueueSize);
 
         bool Publish(ApiEvent event);
         SubscriptionId Subscribe(std::string eventPattern, EventHandler handler);

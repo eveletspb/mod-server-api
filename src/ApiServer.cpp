@@ -10,6 +10,7 @@
 #include "ServerApi/HttpUtils.h"
 #include "ServerApi/ModuleRegistry.h"
 #include "ServerApi/ServerSnapshot.h"
+#include "ServerApi/WebSocketPublishPool.h"
 
 #include "Log.h"
 #include "ObjectAccessor.h"
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <deque>
 #include <exception>
@@ -35,6 +37,7 @@
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/ip/address.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -102,6 +105,30 @@ namespace ServerApi
             });
         }
 
+        bool IsPublishRequest(std::string const& message)
+        {
+            std::size_t const typeKey = message.find(R"("type")");
+            if (typeKey == std::string::npos)
+                return false;
+
+            std::size_t cursor = typeKey + 6;
+            auto skipWhitespace = [&message, &cursor]
+            {
+                while (cursor < message.size() && std::isspace(static_cast<unsigned char>(message[cursor])))
+                    ++cursor;
+            };
+
+            skipWhitespace();
+            if (cursor >= message.size() || message[cursor++] != ':')
+                return false;
+            skipWhitespace();
+            if (message.compare(cursor, 9, R"("publish")") != 0)
+                return false;
+            cursor += 9;
+            skipWhitespace();
+            return cursor < message.size() && (message[cursor] == ',' || message[cursor] == '}');
+        }
+
         bool IsSafeIdentitySubject(std::string_view subject)
         {
             return !subject.empty() && std::all_of(subject.begin(), subject.end(), [](unsigned char character)
@@ -119,7 +146,7 @@ namespace ServerApi
 
         bool IsProtectedEndpoint(std::string_view path)
         {
-            return path.starts_with("/api/v1/") || path == "/ws/v1/events";
+            return path.starts_with("/api/v1/") || path == "/ws/v1/events" || path == "/sse/v1/events";
         }
 
         std::string BuildServerResponse()
@@ -131,14 +158,18 @@ namespace ServerApi
                 snapshot.playersOnline, snapshot.botsOnline);
         }
 
-        std::string BuildMetricsResponse()
+        std::string BuildMetricsResponse(std::shared_ptr<WebSocketPublishPool> const& publishPool)
         {
             ServerSnapshot const snapshot = GetServerSnapshot();
             return Acore::StringFormat(
                 R"({{"activeMaps":{},"activeInstances":{},"playersOnline":{},"botsOnline":{},)"
-                R"("eventQueue":{},"commandQueue":{},"droppedEvents":{}}})",
+                R"("eventQueue":{},"commandQueue":{},"droppedEvents":{},)"
+                R"("webSocketPublishQueue":{},"webSocketPublishDropped":{},"webSocketPublishInvalid":{}}})",
                 snapshot.activeMaps, snapshot.activeInstances, snapshot.playersOnline, snapshot.botsOnline,
-                GetEventBus().QueueSize(), GetCommandQueue().Size(), GetEventBus().DroppedCount());
+                GetEventBus().QueueSize(), GetCommandQueue().Size(), GetEventBus().DroppedCount(),
+                publishPool ? publishPool->QueueSize() : 0,
+                publishPool ? publishPool->DroppedCount() : 0,
+                publishPool ? publishPool->InvalidCount() : 0);
         }
 
         std::string BuildModulesResponse()
@@ -329,14 +360,292 @@ namespace ServerApi
 
         using WebSocketRequest = boost::beast::http::request<boost::beast::http::empty_body>;
 
+        std::string SerializeApiEvent(ApiEvent const& event)
+        {
+            std::string body = "{\"type\":\"" + EscapeJson(event.type)
+                + "\",\"timestamp\":" + std::to_string(event.timestampMilliseconds)
+                + ",\"version\":1,\"data\":{";
+            bool first = true;
+            for (auto const& [key, value] : event.data)
+            {
+                if (!first)
+                    body += ',';
+                first = false;
+                body += Acore::StringFormat("\"{}\":\"{}\"", EscapeJson(key), EscapeJson(value));
+            }
+            body += "}}";
+            return body;
+        }
+
+        std::vector<std::string> ParseSseSubscriptionPatterns(std::string const& target)
+        {
+            std::vector<std::string> patterns;
+            std::string value = QueryValue(target, "events");
+            std::string decoded;
+            decoded.reserve(value.size());
+            for (std::size_t index = 0; index < value.size(); ++index)
+            {
+                if (value[index] == '%' && index + 2 < value.size())
+                {
+                    auto hexValue = [](char character) -> int
+                    {
+                        if (character >= '0' && character <= '9')
+                            return character - '0';
+                        if (character >= 'a' && character <= 'f')
+                            return character - 'a' + 10;
+                        if (character >= 'A' && character <= 'F')
+                            return character - 'A' + 10;
+                        return -1;
+                    };
+                    int const high = hexValue(value[index + 1]);
+                    int const low = hexValue(value[index + 2]);
+                    if (high < 0 || low < 0)
+                        return {};
+                    decoded.push_back(static_cast<char>((high << 4) | low));
+                    index += 2;
+                }
+                else
+                    decoded.push_back(value[index] == '+' ? ' ' : value[index]);
+            }
+            value = std::move(decoded);
+            for (std::size_t start = 0; start < value.size();)
+            {
+                std::size_t end = value.find(',', start);
+                if (end == std::string::npos)
+                    end = value.size();
+                std::string pattern = value.substr(start, end - start);
+                bool valid = !pattern.empty() && pattern != "*" && pattern.size() <= 128;
+                for (std::size_t index = 0; valid && index < pattern.size(); ++index)
+                {
+                    unsigned char const character = static_cast<unsigned char>(pattern[index]);
+                    valid = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                        (character >= '0' && character <= '9') || character == '_' || character == '-' ||
+                        character == '.' ||
+                        (character == '*' && index + 1 == pattern.size());
+                }
+                if (!valid)
+                    return {};
+                patterns.push_back(std::move(pattern));
+                start = end + 1;
+            }
+            return patterns;
+        }
+
+        std::string MakeChunk(std::string payload)
+        {
+            std::ostringstream chunk;
+            chunk << std::hex << payload.size() << "\r\n" << payload << "\r\n";
+            return chunk.str();
+        }
+
+        class SseSession : public std::enable_shared_from_this<SseSession>
+        {
+        public:
+            SseSession(boost::asio::ip::tcp::socket socket, Config config,
+                std::shared_ptr<std::atomic_uint32_t> sseClients, std::vector<std::string> patterns)
+                : _socket(std::move(socket)), _config(std::move(config)), _sseClients(std::move(sseClients)),
+                  _patterns(std::move(patterns)), _heartbeat(_socket.get_executor()) { }
+
+            ~SseSession()
+            {
+                ClearSubscriptions();
+                if (_sseClients)
+                    --*_sseClients;
+            }
+
+            void Start()
+            {
+                Subscribe();
+                auto self = shared_from_this();
+                boost::asio::async_write(_socket, boost::asio::buffer(_responseHeaders),
+                    [self](boost::system::error_code error, std::size_t)
+                {
+                    if (error)
+                    {
+                        self->CloseOnExecutor("header_write_error", error.message());
+                        return;
+                    }
+                    self->_headersWritten = true;
+                    self->ScheduleHeartbeat();
+                    if (!self->_writeQueue.empty())
+                        self->WriteNext();
+                });
+            }
+
+        private:
+            void Subscribe()
+            {
+                std::weak_ptr<SseSession> weakSelf = shared_from_this();
+                for (std::string const& pattern : _patterns)
+                    _subscriptions.push_back(GetEventBus().Subscribe(pattern, [weakSelf](ApiEvent const& event)
+                    {
+                        if (auto self = weakSelf.lock())
+                            self->Enqueue("data: " + SerializeApiEvent(event) + "\n\n");
+                    }));
+            }
+
+            void ScheduleHeartbeat()
+            {
+                _heartbeat.expires_after(std::chrono::seconds(_config.sseHeartbeatSeconds));
+                auto self = shared_from_this();
+                _heartbeat.async_wait([self](boost::system::error_code error)
+                {
+                    if (error || self->_closed)
+                        return;
+                    self->Enqueue(": keep-alive\n\n");
+                    self->ScheduleHeartbeat();
+                });
+            }
+
+            void Enqueue(std::string payload)
+            {
+                std::string chunk = MakeChunk(std::move(payload));
+                bool overflow = false;
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    if (_closeRequested)
+                        return;
+                    if (_pendingMessages >= _config.maxSseQueue ||
+                        _pendingBytes >= _config.maxSseQueueBytes ||
+                        chunk.size() > _config.maxSseQueueBytes - _pendingBytes)
+                    {
+                        _closeRequested = true;
+                        overflow = true;
+                    }
+                    else
+                    {
+                        ++_pendingMessages;
+                        _pendingBytes += chunk.size();
+                    }
+                }
+
+                auto self = shared_from_this();
+                if (overflow)
+                {
+                    boost::asio::post(_socket.get_executor(), [self, attemptedBytes = chunk.size()]
+                    {
+                        self->CloseOnExecutor("outbound_queue_overflow",
+                            "attemptedBytes=" + std::to_string(attemptedBytes));
+                    });
+                    return;
+                }
+
+                boost::asio::post(_socket.get_executor(), [self, chunk = std::move(chunk)]() mutable
+                {
+                    if (self->_closed)
+                    {
+                        self->ReleaseMessage(chunk.size());
+                        return;
+                    }
+                    self->_writeQueue.push_back(std::move(chunk));
+                    if (self->_headersWritten && !self->_writeInProgress)
+                        self->WriteNext();
+                });
+            }
+
+            void WriteNext()
+            {
+                if (_writeQueue.empty() || _closed)
+                    return;
+                _writeInProgress = true;
+                auto self = shared_from_this();
+                boost::asio::async_write(_socket, boost::asio::buffer(_writeQueue.front()),
+                    [self](boost::system::error_code error, std::size_t)
+                {
+                    self->_writeInProgress = false;
+                    if (error)
+                    {
+                        self->CloseOnExecutor("event_write_error", error.message());
+                        return;
+                    }
+                    std::size_t const bytes = self->_writeQueue.front().size();
+                    self->_writeQueue.pop_front();
+                    self->ReleaseMessage(bytes);
+                    self->WriteNext();
+                });
+            }
+
+            void CloseOnExecutor(char const* reason, std::string const& detail)
+            {
+                if (_closed)
+                {
+                    if (!_writeInProgress)
+                        DiscardWriteQueue();
+                    return;
+                }
+                _closed = true;
+                std::size_t pendingMessages;
+                std::size_t pendingBytes;
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    _closeRequested = true;
+                    pendingMessages = _pendingMessages;
+                    pendingBytes = _pendingBytes;
+                }
+                LOG_WARN("server-api.sse", "Closing SSE session: reason={} detail={} pendingMessages={} pendingBytes={}",
+                    reason, detail, pendingMessages, pendingBytes);
+                ClearSubscriptions();
+                _heartbeat.cancel();
+                boost::system::error_code ignored;
+                _socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+                _socket.close(ignored);
+                if (!_writeInProgress)
+                    DiscardWriteQueue();
+            }
+
+            void ReleaseMessage(std::size_t bytes)
+            {
+                std::lock_guard<std::mutex> lock(_outboundMutex);
+                --_pendingMessages;
+                _pendingBytes -= bytes;
+            }
+
+            void DiscardWriteQueue()
+            {
+                while (!_writeQueue.empty())
+                {
+                    ReleaseMessage(_writeQueue.front().size());
+                    _writeQueue.pop_front();
+                }
+            }
+
+            void ClearSubscriptions()
+            {
+                for (SubscriptionId subscription : _subscriptions)
+                    GetEventBus().Unsubscribe(subscription);
+                _subscriptions.clear();
+            }
+
+            boost::asio::ip::tcp::socket _socket;
+            Config _config;
+            std::shared_ptr<std::atomic_uint32_t> _sseClients;
+            std::vector<std::string> _patterns;
+            std::vector<SubscriptionId> _subscriptions;
+            boost::asio::steady_timer _heartbeat;
+            std::string _responseHeaders =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
+                "Cache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\n"
+                "Transfer-Encoding: chunked\r\nX-Accel-Buffering: no\r\n\r\n";
+            std::deque<std::string> _writeQueue;
+            std::mutex _outboundMutex;
+            std::size_t _pendingMessages = 0;
+            std::size_t _pendingBytes = 0;
+            bool _closeRequested = false;
+            bool _headersWritten = false;
+            bool _writeInProgress = false;
+            bool _closed = false;
+        };
+
         class WebSocketSession : public std::enable_shared_from_this<WebSocketSession>
         {
         public:
             WebSocketSession(boost::asio::ip::tcp::socket socket, Config config,
                 std::shared_ptr<std::atomic_uint32_t> webSocketClients,
+                std::shared_ptr<WebSocketPublishPool> publishPool,
                 std::optional<AuthIdentity> identity)
                 : _socket(std::move(socket)), _config(std::move(config)),
-                  _webSocketClients(std::move(webSocketClients)), _identity(std::move(identity)) { }
+                  _webSocketClients(std::move(webSocketClients)), _publishPool(std::move(publishPool)),
+                  _identity(std::move(identity)) { }
 
             ~WebSocketSession()
             {
@@ -394,7 +703,12 @@ namespace ServerApi
                 _socket.async_read(_readBuffer, [self](boost::system::error_code error, std::size_t)
                 {
                     if (error)
+                    {
+                        if (error != boost::beast::websocket::error::closed)
+                            LOG_WARN("server-api.websocket", "WebSocket read failed: {}",
+                                error.message());
                         return;
+                    }
 
                     std::string const message = boost::beast::buffers_to_string(self->_readBuffer.data());
                     self->_readBuffer.consume(self->_readBuffer.size());
@@ -413,10 +727,17 @@ namespace ServerApi
                 }
                 if (_messagesInWindow >= _config.maxWebSocketMessagesPerSecond)
                 {
-                    RequestClose();
+                    RequestClose("messages_per_second_limit", message.size());
                     return;
                 }
                 ++_messagesInWindow;
+
+                if (IsPublishRequest(message))
+                {
+                    if (_publishPool)
+                        _publishPool->TryEnqueue(message);
+                    return;
+                }
 
                 if (message.find(R"("type":"ping")") != std::string::npos)
                 {
@@ -455,35 +776,18 @@ namespace ServerApi
                     _subscriptions.push_back(GetEventBus().Subscribe(pattern, [weakSelf](ApiEvent const& event)
                     {
                         if (auto self = weakSelf.lock())
-                            self->Enqueue(self->SerializeEvent(event));
+                            self->Enqueue(SerializeApiEvent(event));
                     }));
                 }
                 response += "]}";
                 Enqueue(response);
             }
 
-            std::string SerializeEvent(ApiEvent const& event) const
-            {
-                std::string body = "{\"type\":\"" + EscapeJson(event.type)
-                    + "\",\"timestamp\":" + std::to_string(event.timestampMilliseconds)
-                    + ",\"version\":1,\"data\":{";
-                bool first = true;
-                for (auto const& [key, value] : event.data)
-                {
-                    if (!first)
-                        body += ',';
-                    first = false;
-                    body += Acore::StringFormat("\"{}\":\"{}\"", EscapeJson(key), EscapeJson(value));
-                }
-                body += "}}";
-                return body;
-            }
-
             void Enqueue(std::string message)
             {
                 if (message.size() > _config.maxWebSocketFrameBytes)
                 {
-                    RequestClose();
+                    RequestClose("outbound_frame_too_large", message.size());
                     return;
                 }
 
@@ -509,9 +813,10 @@ namespace ServerApi
                 auto self = shared_from_this();
                 if (overflow)
                 {
-                    boost::asio::post(_socket.get_executor(), [self]
+                    std::size_t const attemptedBytes = message.size();
+                    boost::asio::post(_socket.get_executor(), [self, attemptedBytes]
                     {
-                        self->CloseOnExecutor();
+                        self->CloseOnExecutor("outbound_queue_overflow", attemptedBytes);
                     });
                     return;
                 }
@@ -544,7 +849,9 @@ namespace ServerApi
                     if (error)
                     {
                         self->_writeInProgress = false;
-                        self->CloseOnExecutor();
+                        LOG_WARN("server-api.websocket", "WebSocket write failed: {}",
+                            error.message());
+                        self->CloseOnExecutor("write_error");
                         return;
                     }
 
@@ -561,7 +868,7 @@ namespace ServerApi
                 });
             }
 
-            void RequestClose()
+            void RequestClose(char const* reason, std::size_t attemptedBytes = 0)
             {
                 {
                     std::lock_guard<std::mutex> lock(_outboundMutex);
@@ -571,17 +878,28 @@ namespace ServerApi
                 }
 
                 auto self = shared_from_this();
-                boost::asio::post(_socket.get_executor(), [self]
+                boost::asio::post(_socket.get_executor(), [self, reason, attemptedBytes]
                 {
-                    self->CloseOnExecutor();
+                    self->CloseOnExecutor(reason, attemptedBytes);
                 });
             }
 
-            void CloseOnExecutor()
+            void CloseOnExecutor(char const* reason, std::size_t attemptedBytes = 0)
             {
                 if (_closed)
                     return;
 
+                std::size_t pendingMessages;
+                std::size_t pendingBytes;
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    pendingMessages = _pendingMessages;
+                    pendingBytes = _pendingBytes;
+                }
+                LOG_WARN("server-api.websocket",
+                    "Closing WebSocket session: reason={} attemptedBytes={} pendingMessages={} "
+                    "pendingBytes={} queuedMessages={}",
+                    reason, attemptedBytes, pendingMessages, pendingBytes, _writeQueue.size());
                 _closed = true;
                 ClearSubscriptions();
                 boost::system::error_code ignored;
@@ -628,6 +946,7 @@ namespace ServerApi
             std::chrono::steady_clock::time_point _messageWindowStart = std::chrono::steady_clock::now();
             uint32_t _messagesInWindow = 0;
             std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
+            std::shared_ptr<WebSocketPublishPool> _publishPool;
             std::optional<AuthIdentity> _identity;
         };
     }
@@ -637,13 +956,16 @@ namespace ServerApi
     public:
         HttpSession(boost::asio::ip::tcp::socket socket, Config config,
             std::shared_ptr<std::atomic_uint32_t> webSocketClients,
+            std::shared_ptr<std::atomic_uint32_t> sseClients,
             std::shared_ptr<RequestRateLimiter> requestRateLimiter,
             std::shared_ptr<CharactersApi> charactersApi,
+            std::shared_ptr<WebSocketPublishPool> publishPool,
             std::shared_ptr<AuthenticationProvider> authenticationProvider,
             bool authenticationRequired)
             : _socket(std::move(socket)), _config(std::move(config)),
-              _webSocketClients(std::move(webSocketClients)), _requestRateLimiter(std::move(requestRateLimiter)),
-              _charactersApi(std::move(charactersApi)),
+              _webSocketClients(std::move(webSocketClients)), _sseClients(std::move(sseClients)),
+              _requestRateLimiter(std::move(requestRateLimiter)),
+              _charactersApi(std::move(charactersApi)), _publishPool(std::move(publishPool)),
               _authenticationProvider(std::move(authenticationProvider)),
               _authenticationRequired(authenticationRequired) { }
 
@@ -792,8 +1114,40 @@ namespace ServerApi
                 }
 
                 auto session = std::make_shared<WebSocketSession>(
-                    std::move(_socket), _config, _webSocketClients, std::move(identity));
+                    std::move(_socket), _config, _webSocketClients, _publishPool, std::move(identity));
                 session->Start(BuildWebSocketRequest(target));
+            }
+            else if (path == "/sse/v1/events")
+            {
+                if (!RequireMethod(method, "GET"))
+                    return;
+                if (!_config.sseEnabled)
+                {
+                    WriteResponse(404, "Not Found", R"({"error":{"code":"NOT_FOUND"}})");
+                    return;
+                }
+
+                std::vector<std::string> patterns = ParseSseSubscriptionPatterns(target);
+                if (patterns.empty() || patterns.size() > _config.maxSseSubscriptions)
+                {
+                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_SUBSCRIPTIONS"}})");
+                    return;
+                }
+
+                uint32_t clients = _sseClients->load();
+                while (clients < _config.maxSseClients &&
+                    !_sseClients->compare_exchange_weak(clients, clients + 1))
+                {
+                }
+                if (clients >= _config.maxSseClients)
+                {
+                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"SSE_CLIENT_LIMIT"}})");
+                    return;
+                }
+
+                auto session = std::make_shared<SseSession>(
+                    std::move(_socket), _config, _sseClients, std::move(patterns));
+                session->Start();
             }
             else if (path == "/api/v1/server" || path == "/api/v1/server/metrics")
             {
@@ -803,7 +1157,7 @@ namespace ServerApi
                 if (path == "/api/v1/server")
                     WriteResponse(200, "OK", BuildServerResponse());
                 else
-                    WriteResponse(200, "OK", BuildMetricsResponse());
+                    WriteResponse(200, "OK", BuildMetricsResponse(_publishPool));
             }
             else if (path == "/api/v1/modules")
             {
@@ -1061,8 +1415,10 @@ namespace ServerApi
         std::string _request;
         std::string _response;
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
+        std::shared_ptr<std::atomic_uint32_t> _sseClients;
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter;
         std::shared_ptr<CharactersApi> _charactersApi;
+        std::shared_ptr<WebSocketPublishPool> _publishPool;
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
     };
@@ -1145,6 +1501,8 @@ namespace ServerApi
 
         _charactersApi = std::make_shared<CharactersApi>(_ioContext);
         _charactersApi->Start();
+        _webSocketPublishPool = std::make_shared<WebSocketPublishPool>(_config.maxWebSocketPublishQueue);
+        _webSocketPublishPool->Start();
         AcceptNext();
         _thread = std::thread([this]
         {
@@ -1176,9 +1534,13 @@ namespace ServerApi
         if (_thread.joinable())
             _thread.join();
 
+        if (_webSocketPublishPool)
+            _webSocketPublishPool->Stop();
+
         boost::system::error_code error;
         _acceptor.close(error);
         _charactersApi.reset();
+        _webSocketPublishPool.reset();
         _authenticationProvider.reset();
         _authenticationRequired = false;
         _ioContext.restart();
@@ -1191,7 +1553,7 @@ namespace ServerApi
         {
             if (!error)
                 std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
-                    _requestRateLimiter, _charactersApi, _authenticationProvider,
+                    _sseClients, _requestRateLimiter, _charactersApi, _webSocketPublishPool, _authenticationProvider,
                     _authenticationRequired)->Start();
 
             if (_running)
