@@ -48,15 +48,18 @@ namespace ServerApi
         // Returns false when the bounded number of in-flight requests is reached.
         bool List(std::string target, Completion completion);
         bool Get(uint32_t guid, Completion completion);
+        bool ItemLevels(std::string target, Completion completion);
 
     private:
         struct BotTypeSnapshot;
         struct ListState;
         struct ProfileState;
+        struct ItemLevelState;
 
         bool ReserveRequest();
         void CompleteRequest(Completion completion, ApiResponse response);
         bool SubmitQuery(std::string sql, std::function<void(QueryResult)> callback);
+        bool SubmitWorldQuery(std::string sql, std::function<void(QueryResult)> callback);
         void QueryOrProbe(std::string sql, std::function<void(QueryResult)> callback,
             std::function<void()> onDatabaseUnavailable);
         void ScheduleCallbackPoll();

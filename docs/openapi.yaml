@@ -141,6 +141,7 @@ paths:
         - {$ref: '#/components/parameters/CharacterIncludeDeleted'}
         - {$ref: '#/components/parameters/CharacterIncludeTalents'}
         - {$ref: '#/components/parameters/CharacterGUIDs'}
+        - {$ref: '#/components/parameters/CharacterExactNames'}
       responses:
         '200':
           description: Character page; a selective dynamic filter can produce a short page while hasMore remains true.
@@ -164,6 +165,42 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/CharacterUnavailable'}
+  /api/v1/characters/item-levels:
+    get:
+      tags: [Characters]
+      summary: Read average equipped item levels for character GUIDs
+      parameters:
+        - name: guids
+          in: query
+          required: false
+          description: Comma-separated list of at most 100 character GUIDs; provide this or names.
+          schema: {type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$'}
+        - name: names
+          in: query
+          required: false
+          description: Comma-separated exact character names, at most 40; provide this or guids.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Average item level for each requested character
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [guid, name, itemLevel]
+                      properties:
+                        guid: {type: integer, format: int64, maximum: 4294967295}
+                        name: {type: string}
+                        itemLevel: {type: integer, format: int32, minimum: 0}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/CharacterUnavailable'}
   /api/v1/groups:
     get:
@@ -408,6 +445,12 @@ components:
       required: false
       description: Comma-separated list of at most 100 character GUIDs.
       schema: {type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$'}
+    CharacterExactNames:
+      name: names
+      in: query
+      required: false
+      description: Comma-separated exact character names, at most 40 entries.
+      schema: {type: string}
   responses:
     BadRequest:
       description: Invalid request

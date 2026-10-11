@@ -140,8 +140,9 @@ power).
 
 ### Characters
 
-The character API is read-only and reads the current realm's Character DB.
-It includes online and offline characters. Deleted rows are hidden by default;
+The character API is read-only and reads the current realm's Character DB, plus
+World DB item templates for item-level calculations. It includes online and
+offline characters. Deleted rows are hidden by default;
 `includeDeleted=true` includes soft-deleted rows in list results. Character
 details always hide deleted rows and return `404` for a deleted or missing GUID.
 
@@ -149,6 +150,7 @@ details always hide deleted rows and return `404` for a deleted or missing GUID.
 |---|---|---|
 | `GET` | `/api/v1/characters` | configured provider |
 | `GET` | `/api/v1/characters/{guid}` | configured provider |
+| `GET` | `/api/v1/characters/item-levels?guids=...` | configured provider |
 
 List parameters:
 
@@ -162,6 +164,7 @@ List parameters:
 | `botType` | `player`, `random`, `addclass` or `unknown` |
 | `minLevel`, `maxLevel` | Inclusive level bounds |
 | `guids` | Comma-separated exact GUID list, at most 100 entries |
+| `names` | Comma-separated exact character names, at most 40 entries |
 | `includeTalents` | Include active talent spell IDs for local specialization resolution |
 
 Filters are combined with `AND`. Unknown or repeated parameters, invalid values,
@@ -192,6 +195,11 @@ group. With `includeTalents=true`, entries also contain `talentSpells`, the
 active specialization's learned spell IDs. A profile adds `xp`, `money`, `talents` (`activeGroup` and
 `totalGroups`), `equipment` entries (`slot` and `itemEntry`) and `professions`
 (`skillId`, `name`, `value` and `max`).
+
+The item-level endpoint accepts either up to 100 `guids` or up to 40 exact
+`names`. It returns the rounded average `ItemLevel` for equipped inventory slots,
+excluding shirt and tabard. It reads inventory from Character DB and item
+templates from World DB inside the module.
 
 Online status, map, zone and coordinates are taken from the current runtime
 snapshot for online characters. Other character fields are read from DB and

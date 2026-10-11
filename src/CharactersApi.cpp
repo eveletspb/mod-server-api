@@ -50,6 +50,7 @@ namespace ServerApi
             std::string namePrefix;
             std::optional<uint32_t> accountId;
             std::vector<uint32_t> guids;
+            std::vector<std::string> exactNames;
             std::optional<bool> online;
             std::optional<bool> bot;
             std::optional<std::string> botType;
@@ -216,10 +217,10 @@ namespace ServerApi
                 }
             }
 
-            static constexpr std::array<std::string_view, 17> AllowedKeys = {
+            static constexpr std::array<std::string_view, 18> AllowedKeys = {
                 "limit", "cursor", "name", "accountId", "online", "bot", "botType", "race",
                 "class", "minLevel", "maxLevel", "guildId", "mapId", "zoneId", "includeDeleted",
-                "includeTalents", "guids"
+                "includeTalents", "guids", "names"
             };
             for (auto const& [key, value] : values)
             {
@@ -266,17 +267,45 @@ namespace ServerApi
                     std::size_t end = guids->second.find(',', start);
                     if (end == std::string::npos)
                         end = guids->second.size();
-                    if (end == start || (end + 1 == guids->second.size() && guids->second[end] == ','))
+                    if (end == start ||
+                        (end + 1 == guids->second.size() && guids->second[end] == ','))
                         return false;
                     uint32_t guid = 0;
                     auto const [parsedEnd, error] = std::from_chars(
                         guids->second.data() + start, guids->second.data() + end, guid);
-                    if (error != std::errc{} || parsedEnd != guids->second.data() + end || guid == 0 ||
-                        filters.guids.size() >= 100)
+                    if (error != std::errc{} || parsedEnd != guids->second.data() + end ||
+                        guid == 0 || filters.guids.size() >= 100)
                         return false;
-                    if (std::find(filters.guids.begin(), filters.guids.end(), guid) != filters.guids.end())
+                    if (std::find(filters.guids.begin(), filters.guids.end(), guid) !=
+                        filters.guids.end())
                         return false;
                     filters.guids.push_back(guid);
+                    start = end + 1;
+                }
+            }
+
+            auto const names = values.find("names");
+            if (names != values.end())
+            {
+                if (names->second.empty())
+                    return false;
+                std::size_t start = 0;
+                while (start < names->second.size())
+                {
+                    std::size_t end = names->second.find(',', start);
+                    if (end == std::string::npos)
+                        end = names->second.size();
+                    std::string name = names->second.substr(start, end - start);
+                    if (name.empty() || name.size() > 96 || filters.exactNames.size() >= 40 ||
+                        std::any_of(name.begin(), name.end(), [](unsigned char character)
+                            { return character < 0x20 || character == 0x7f; }))
+                        return false;
+                    if (std::find(filters.exactNames.begin(), filters.exactNames.end(), name) !=
+                        filters.exactNames.end())
+                        return false;
+                    filters.exactNames.push_back(std::move(name));
+                    if (end + 1 == names->second.size() && names->second[end] == ',')
+                        return false;
                     start = end + 1;
                 }
             }
@@ -452,6 +481,17 @@ namespace ServerApi
                     "c.deleteInfos_Name COLLATE utf8mb4_unicode_ci, '') LIKE " +
                     SqlString(NamePattern(filters.namePrefix)) +
                     " COLLATE utf8mb4_unicode_ci ESCAPE '='";
+            if (!filters.exactNames.empty())
+            {
+                where += " AND c.name IN (";
+                for (std::size_t index = 0; index < filters.exactNames.size(); ++index)
+                {
+                    if (index != 0)
+                        where += ',';
+                    where += SqlString(filters.exactNames[index]);
+                }
+                where += ')';
+            }
             if (filters.race)
                 where += " AND c.race = " + std::to_string(*filters.race);
             if (filters.playerClass)
@@ -655,6 +695,16 @@ namespace ServerApi
         bool finished = false;
     };
 
+    struct CharactersApi::ItemLevelState
+    {
+        Completion completion;
+        std::vector<uint32_t> guids;
+        std::unordered_map<uint32_t, std::string> namesByGuid;
+        std::unordered_map<uint32_t, std::vector<uint32_t>> itemEntriesByGuid;
+        std::unordered_map<uint32_t, uint16_t> itemLevelsByEntry;
+        bool finished = false;
+    };
+
     CharactersApi::CharactersApi(boost::asio::io_context& ioContext)
         : _ioContext(ioContext), _callbackTimer(ioContext), _botTypes(std::make_shared<BotTypeSnapshot>()) { }
 
@@ -721,6 +771,33 @@ namespace ServerApi
             if (_activeQueries > 0)
                 --_activeQueries;
             LOG_ERROR("server-api.characters", "Could not enqueue character database query: {}", exception.what());
+            return false;
+        }
+    }
+
+    bool CharactersApi::SubmitWorldQuery(std::string sql, std::function<void(QueryResult)> callback)
+    {
+        if (_stopped || _activeQueries >= MaxConcurrentRequests)
+            return false;
+
+        try
+        {
+            ++_activeQueries;
+            QueryCallback query = WorldDatabase.AsyncQuery(sql).WithCallback(
+                [this, callback = std::move(callback)](QueryResult result) mutable
+            {
+                if (_activeQueries > 0)
+                    --_activeQueries;
+                callback(std::move(result));
+            });
+            _queryCallbacks.AddCallback(std::move(query));
+            return true;
+        }
+        catch (std::exception const& exception)
+        {
+            if (_activeQueries > 0)
+                --_activeQueries;
+            LOG_ERROR("server-api.characters", "Could not enqueue world database query: {}", exception.what());
             return false;
         }
     }
@@ -1009,6 +1086,148 @@ namespace ServerApi
             state->finished = true;
             CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
                 "DATABASE_UNAVAILABLE"));
+        });
+        return true;
+    }
+
+    bool CharactersApi::ItemLevels(std::string target, Completion completion)
+    {
+        CharacterFilters filters;
+        if (!ParseFilters(target, filters) ||
+            (filters.guids.empty() == filters.exactNames.empty()) ||
+            filters.guids.size() > 100 || filters.exactNames.size() > 40)
+        {
+            completion(MakeError(400, "Bad Request", "INVALID_FILTER"));
+            return true;
+        }
+        if (!ReserveRequest())
+            return false;
+
+        auto state = std::make_shared<ItemLevelState>();
+        state->completion = std::move(completion);
+        std::string filterSql;
+        if (!filters.guids.empty())
+        {
+            state->guids = std::move(filters.guids);
+            for (uint32_t guid : state->guids)
+                state->itemEntriesByGuid.emplace(guid, std::vector<uint32_t>{});
+            for (std::size_t index = 0; index < state->guids.size(); ++index)
+            {
+                if (index != 0)
+                    filterSql += ',';
+                filterSql += std::to_string(state->guids[index]);
+            }
+            filterSql = "c.guid IN (" + filterSql + ')';
+        }
+        else
+        {
+            for (std::size_t index = 0; index < filters.exactNames.size(); ++index)
+            {
+                if (index != 0)
+                    filterSql += ',';
+                filterSql += SqlString(filters.exactNames[index]);
+            }
+            filterSql = "c.name IN (" + filterSql + ')';
+        }
+        std::string const equipmentSql = "SELECT c.guid, c.name, ii.itemEntry FROM characters c "
+            "LEFT JOIN character_inventory ci ON ci.guid = c.guid AND ci.bag = 0 "
+            "AND ci.slot BETWEEN 0 AND 18 AND ci.slot NOT IN (3, 18) "
+            "LEFT JOIN item_instance ii ON ii.guid = ci.item "
+            "WHERE c.deleteDate IS NULL AND " + filterSql;
+
+        auto finish = [this, state]
+        {
+            if (state->finished)
+                return;
+            state->finished = true;
+            std::string body = "{\"data\":[";
+            for (std::size_t index = 0; index < state->guids.size(); ++index)
+            {
+                if (index != 0)
+                    body += ',';
+                uint64_t total = 0;
+                uint32_t count = 0;
+                for (uint32_t entry : state->itemEntriesByGuid[state->guids[index]])
+                {
+                    auto const item = state->itemLevelsByEntry.find(entry);
+                    if (item == state->itemLevelsByEntry.end())
+                        continue;
+                    total += item->second;
+                    ++count;
+                }
+                uint16_t const average = count == 0 ? 0 : static_cast<uint16_t>(std::lround(
+                    static_cast<double>(total) / count));
+                uint32_t const guid = state->guids[index];
+                body += "{\"guid\":" + std::to_string(guid) +
+                    ",\"name\":\"" + EscapeJson(state->namesByGuid[guid]) + "\"" +
+                    ",\"itemLevel\":" + std::to_string(average) + "}";
+            }
+            body += "]}";
+            CompleteRequest(std::move(state->completion), {200, "OK", std::move(body)});
+        };
+
+        QueryOrProbe(std::move(equipmentSql), [this, state, finish](QueryResult result)
+        {
+            std::vector<uint32_t> entries;
+            if (result)
+            {
+                do
+                {
+                    Field* fields = result->Fetch();
+                    uint32_t const guid = fields[0].Get<uint32>();
+                    bool const inserted = state->namesByGuid.emplace(
+                        guid, fields[1].Get<std::string>()).second;
+                    if (inserted)
+                    {
+                        if (state->itemEntriesByGuid.find(guid) == state->itemEntriesByGuid.end())
+                            state->guids.push_back(guid);
+                        state->itemEntriesByGuid.try_emplace(guid, std::vector<uint32_t>{});
+                    }
+                    if (!fields[2].IsNull())
+                    {
+                        uint32_t const entry = fields[2].Get<uint32>();
+                        state->itemEntriesByGuid[guid].push_back(entry);
+                        entries.push_back(entry);
+                    }
+                } while (result->NextRow());
+            }
+            std::sort(entries.begin(), entries.end());
+            entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+            if (entries.empty())
+            {
+                finish();
+                return;
+            }
+
+            std::string entryList;
+            for (std::size_t index = 0; index < entries.size(); ++index)
+            {
+                if (index != 0)
+                    entryList += ',';
+                entryList += std::to_string(entries[index]);
+            }
+            std::string const itemSql = "SELECT entry, ItemLevel FROM item_template WHERE entry IN (" +
+                entryList + ")";
+            if (!SubmitWorldQuery(std::move(itemSql), [state, finish](QueryResult itemResult)
+            {
+                if (itemResult)
+                {
+                    do
+                    {
+                        Field* fields = itemResult->Fetch();
+                        state->itemLevelsByEntry.emplace(fields[0].Get<uint32>(),
+                            fields[1].Get<uint16>());
+                    } while (itemResult->NextRow());
+                }
+                finish();
+            }))
+                CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
+                    "WORLD_DATABASE_UNAVAILABLE"));
+        }, [this, state]
+        {
+            state->finished = true;
+            CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
+                "CHARACTER_DATABASE_UNAVAILABLE"));
         });
         return true;
     }

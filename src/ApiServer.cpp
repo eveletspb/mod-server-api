@@ -1183,6 +1183,14 @@ namespace ServerApi
                     }
                 };
 
+                if (path == "/api/v1/characters/item-levels")
+                {
+                    if (!_charactersApi ||
+                        !_charactersApi->ItemLevels(target, std::move(completion)))
+                        WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    return;
+                }
                 if (path == "/api/v1/characters")
                 {
                     if (!_charactersApi || !_charactersApi->List(target, std::move(completion)))
