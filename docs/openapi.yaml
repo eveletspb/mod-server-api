@@ -139,6 +139,8 @@ paths:
         - {$ref: '#/components/parameters/CharacterMapId'}
         - {$ref: '#/components/parameters/CharacterZoneId'}
         - {$ref: '#/components/parameters/CharacterIncludeDeleted'}
+        - {$ref: '#/components/parameters/CharacterIncludeTalents'}
+        - {$ref: '#/components/parameters/CharacterGUIDs'}
       responses:
         '200':
           description: Character page; a selective dynamic filter can produce a short page while hasMore remains true.
@@ -394,6 +396,18 @@ components:
       required: false
       description: Include soft-deleted rows in list results. Deleted profiles remain hidden.
       schema: {type: boolean, default: false}
+    CharacterIncludeTalents:
+      name: includeTalents
+      in: query
+      required: false
+      description: Include active talent spell IDs for local specialization resolution.
+      schema: {type: boolean, default: false}
+    CharacterGUIDs:
+      name: guids
+      in: query
+      required: false
+      description: Comma-separated list of at most 100 character GUIDs.
+      schema: {type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*)*$'}
   responses:
     BadRequest:
       description: Invalid request
@@ -504,7 +518,7 @@ components:
         nextCursor: {type: integer, format: int64, nullable: true, maximum: 4294967295}
     Character:
       type: object
-      required: [guid, accountId, name, race, class, gender, level, guildId, guildName, online, bot, botType, deleted, mapId, zoneId, location]
+      required: [guid, accountId, name, race, class, gender, level, guildId, guildName, online, available, bot, botType, deleted, mapId, zoneId, location]
       properties:
         guid: {type: integer, format: int64, maximum: 4294967295}
         accountId: {type: integer, format: int64, maximum: 4294967295}
@@ -516,6 +530,11 @@ components:
         guildId: {type: integer, format: int64, maximum: 4294967295}
         guildName: {type: string}
         online: {type: boolean}
+        available: {type: boolean, description: Offline or not currently assigned to a group}
+        talentSpells:
+          type: array
+          description: Present only when includeTalents=true; contains active talent spell IDs.
+          items: {type: integer, format: int32}
         bot: {type: boolean}
         botType: {type: string, enum: [player, random, addclass, unknown]}
         deleted: {type: boolean}

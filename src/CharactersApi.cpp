@@ -49,6 +49,7 @@ namespace ServerApi
             uint32_t cursor = 0;
             std::string namePrefix;
             std::optional<uint32_t> accountId;
+            std::vector<uint32_t> guids;
             std::optional<bool> online;
             std::optional<bool> bot;
             std::optional<std::string> botType;
@@ -60,6 +61,7 @@ namespace ServerApi
             std::optional<uint32_t> mapId;
             std::optional<uint32_t> zoneId;
             bool includeDeleted = false;
+            bool includeTalents = false;
         };
 
         struct CharacterRecord
@@ -84,6 +86,9 @@ namespace ServerApi
             float orientation = 0.0f;
             uint8_t activeTalentGroup = 0;
             uint8_t talentGroupsCount = 1;
+            bool available = false;
+            bool hasTalentSpells = false;
+            std::vector<uint32_t> talentSpells;
         };
 
         struct EquippedItem
@@ -211,9 +216,10 @@ namespace ServerApi
                 }
             }
 
-            static constexpr std::array<std::string_view, 15> AllowedKeys = {
+            static constexpr std::array<std::string_view, 17> AllowedKeys = {
                 "limit", "cursor", "name", "accountId", "online", "bot", "botType", "race",
-                "class", "minLevel", "maxLevel", "guildId", "mapId", "zoneId", "includeDeleted"
+                "class", "minLevel", "maxLevel", "guildId", "mapId", "zoneId", "includeDeleted",
+                "includeTalents", "guids"
             };
             for (auto const& [key, value] : values)
             {
@@ -249,6 +255,32 @@ namespace ServerApi
                 !ParseOptionalNumber(values, "zoneId", filters.zoneId))
                 return false;
 
+            auto const guids = values.find("guids");
+            if (guids != values.end())
+            {
+                if (guids->second.empty())
+                    return false;
+                std::size_t start = 0;
+                while (start < guids->second.size())
+                {
+                    std::size_t end = guids->second.find(',', start);
+                    if (end == std::string::npos)
+                        end = guids->second.size();
+                    if (end == start || (end + 1 == guids->second.size() && guids->second[end] == ','))
+                        return false;
+                    uint32_t guid = 0;
+                    auto const [parsedEnd, error] = std::from_chars(
+                        guids->second.data() + start, guids->second.data() + end, guid);
+                    if (error != std::errc{} || parsedEnd != guids->second.data() + end || guid == 0 ||
+                        filters.guids.size() >= 100)
+                        return false;
+                    if (std::find(filters.guids.begin(), filters.guids.end(), guid) != filters.guids.end())
+                        return false;
+                    filters.guids.push_back(guid);
+                    start = end + 1;
+                }
+            }
+
             std::optional<uint32_t> race;
             std::optional<uint32_t> playerClass;
             std::optional<uint32_t> minLevel;
@@ -270,7 +302,7 @@ namespace ServerApi
                 return false;
 
             for (auto [key, output] : {std::pair<std::string_view, std::optional<bool>*>{"online", &filters.online},
-                {"bot", &filters.bot}, {"includeDeleted", nullptr}})
+                {"bot", &filters.bot}, {"includeDeleted", nullptr}, {"includeTalents", nullptr}})
             {
                 auto const value = values.find(std::string(key));
                 if (value == values.end())
@@ -280,8 +312,10 @@ namespace ServerApi
                     return false;
                 if (output)
                     *output = parsed;
-                else
+                else if (key == "includeDeleted")
                     filters.includeDeleted = parsed;
+                else
+                    filters.includeTalents = parsed;
             }
 
             auto const botType = values.find("botType");
@@ -326,7 +360,7 @@ namespace ServerApi
             return pattern;
         }
 
-        CharacterRecord ReadCharacter(Field* fields)
+        CharacterRecord ReadCharacter(Field* fields, bool includeTalents = false)
         {
             CharacterRecord character;
             character.guid = fields[0].Get<uint32>();
@@ -349,20 +383,48 @@ namespace ServerApi
             character.orientation = fields[17].Get<float>();
             character.activeTalentGroup = fields[18].Get<uint8>();
             character.talentGroupsCount = fields[19].Get<uint8>();
+            character.available = fields[20].Get<bool>();
+            if (includeTalents)
+            {
+                character.hasTalentSpells = true;
+                std::string const spells = fields[21].Get<std::string>();
+                for (std::size_t start = 0; start < spells.size();)
+                {
+                    std::size_t end = spells.find(',', start);
+                    if (end == std::string::npos)
+                        end = spells.size();
+                    uint32_t spell = 0;
+                    auto const [parsedEnd, error] = std::from_chars(
+                        spells.data() + start, spells.data() + end, spell);
+                    if (error == std::errc{} && parsedEnd == spells.data() + end && spell != 0)
+                        character.talentSpells.push_back(spell);
+                    start = end + 1;
+                }
+            }
             return character;
         }
 
-        std::string CharacterSelect(std::string_view where)
+        std::string CharacterSelect(std::string_view where, bool includeTalents = false)
         {
-            return "SELECT c.guid, COALESCE(NULLIF(c.account, 0), c.deleteInfos_Account, 0), "
+            std::string sql = "SELECT c.guid, COALESCE(NULLIF(c.account, 0), c.deleteInfos_Account, 0), "
                 "COALESCE(NULLIF(c.name COLLATE utf8mb4_unicode_ci, ''), "
                 "c.deleteInfos_Name COLLATE utf8mb4_unicode_ci, ''), c.race, c.class, c.gender, c.level, "
                 "c.xp, c.money, COALESCE(gm.guildid, 0), COALESCE(g.name, ''), c.map, c.zone, c.deleteDate, "
                 "c.position_x, c.position_y, c.position_z, c.orientation, "
-                "c.activeTalentGroup, c.talentGroupsCount "
+                "c.activeTalentGroup, c.talentGroupsCount, "
+                "NOT EXISTS (SELECT 1 FROM group_member gm2 WHERE gm2.memberGuid = c.guid) "
                 "FROM characters c "
                 "LEFT JOIN guild_member gm ON gm.guid = c.guid "
                 "LEFT JOIN guild g ON g.guildid = gm.guildid WHERE " + std::string(where);
+            if (includeTalents)
+            {
+                std::size_t const from = sql.find(" FROM characters c ");
+                sql.insert(from,
+                    ",(SELECT COALESCE(GROUP_CONCAT(DISTINCT ct.spell ORDER BY ct.spell SEPARATOR ','), '') "
+                    "FROM character_talent ct WHERE ct.guid = c.guid "
+                    "AND (ct.specMask & (1 << c.activeTalentGroup)) != 0) ");
+            }
+            return sql;
         }
 
         std::string BuildListSql(CharacterFilters const& filters, uint32_t cursor,
@@ -374,6 +436,17 @@ namespace ServerApi
             if (filters.accountId)
                 where += " AND COALESCE(NULLIF(c.account, 0), c.deleteInfos_Account, 0) = " +
                     std::to_string(*filters.accountId);
+            if (!filters.guids.empty())
+            {
+                where += " AND c.guid IN (";
+                for (std::size_t index = 0; index < filters.guids.size(); ++index)
+                {
+                    if (index != 0)
+                        where += ',';
+                    where += std::to_string(filters.guids[index]);
+                }
+                where += ')';
+            }
             if (!filters.namePrefix.empty())
                 where += " AND COALESCE(NULLIF(c.name COLLATE utf8mb4_unicode_ci, ''), "
                     "c.deleteInfos_Name COLLATE utf8mb4_unicode_ci, '') LIKE " +
@@ -407,7 +480,7 @@ namespace ServerApi
                 }
             }
 
-            return CharacterSelect(where) + " ORDER BY c.guid ASC LIMIT " + std::to_string(batchSize);
+            return CharacterSelect(where, filters.includeTalents) + " ORDER BY c.guid ASC LIMIT " + std::to_string(batchSize);
         }
 
         std::string BotTypeName(uint32_t accountId, bool available,
@@ -439,7 +512,7 @@ namespace ServerApi
             float const y = finite(runtime ? runtime->y : character.y);
             float const z = finite(runtime ? runtime->z : character.z);
             float const orientation = finite(runtime ? runtime->orientation : character.orientation);
-            return "{\"guid\":" + std::to_string(character.guid) +
+            std::string body = "{\"guid\":" + std::to_string(character.guid) +
                 ",\"accountId\":" + std::to_string(character.accountId) +
                 ",\"name\":\"" + EscapeJson(character.name) + "\"" +
                 ",\"race\":" + std::to_string(character.race) +
@@ -449,6 +522,7 @@ namespace ServerApi
                 ",\"guildId\":" + std::to_string(character.guildId) +
                 ",\"guildName\":\"" + EscapeJson(character.guildName) + "\"" +
                 ",\"online\":" + (online ? "true" : "false") +
+                ",\"available\":" + ((!online || character.available) ? "true" : "false") +
                 ",\"bot\":" + (bot ? "true" : "false") +
                 ",\"botType\":\"" + EscapeJson(botType) + "\"" +
                 ",\"deleted\":" + (character.deleted ? "true" : "false") +
@@ -459,6 +533,19 @@ namespace ServerApi
                 ",\"x\":" + std::to_string(x) + ",\"y\":" + std::to_string(y) +
                 ",\"z\":" + std::to_string(z) + ",\"orientation\":" +
                 std::to_string(orientation) + "}}";
+            if (character.hasTalentSpells)
+            {
+                std::string talentJson = ",\"talentSpells\":[";
+                for (std::size_t index = 0; index < character.talentSpells.size(); ++index)
+                {
+                    if (index != 0)
+                        talentJson += ',';
+                    talentJson += std::to_string(character.talentSpells[index]);
+                }
+                talentJson += ']';
+                body.insert(body.size() - 1, talentJson);
+            }
+            return body;
         }
 
         std::string_view ProfessionName(uint16_t skill)
@@ -820,7 +907,7 @@ namespace ServerApi
             {
                 do
                 {
-                    CharacterRecord character = ReadCharacter(result->Fetch());
+                    CharacterRecord character = ReadCharacter(result->Fetch(), state->filters.includeTalents);
                     ++rowCount;
                     if (state->filters.online != true)
                     {

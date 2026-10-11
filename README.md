@@ -161,6 +161,8 @@ List parameters:
 | `online`, `bot`, `includeDeleted` | Boolean (`true`/`false` or `1`/`0`) |
 | `botType` | `player`, `random`, `addclass` or `unknown` |
 | `minLevel`, `maxLevel` | Inclusive level bounds |
+| `guids` | Comma-separated exact GUID list, at most 100 entries |
+| `includeTalents` | Include active talent spell IDs for local specialization resolution |
 
 Filters are combined with `AND`. Unknown or repeated parameters, invalid values,
 and `minLevel > maxLevel` return `400 INVALID_FILTER`. The cursor is an
@@ -183,9 +185,11 @@ continue with `nextCursor` while `hasMore` is true. Concurrent catalog/profile
 requests are capped at 32 and excess requests receive `503`.
 
 Each list entry includes `guid`, `accountId`, `name`, `race`, `class`, `gender`,
-`level`, `guildId`, `guildName`, `online`, `bot`, `botType`, `deleted`,
+`level`, `guildId`, `guildName`, `online`, `available`, `bot`, `botType`, `deleted`,
 `mapId`, `zoneId` and `location` (`mapId`, `zoneId`, `x`, `y`, `z` and
-`orientation`). A profile adds `xp`, `money`, `talents` (`activeGroup` and
+`orientation`). `available` is true when the character is offline or not in a
+group. With `includeTalents=true`, entries also contain `talentSpells`, the
+active specialization's learned spell IDs. A profile adds `xp`, `money`, `talents` (`activeGroup` and
 `totalGroups`), `equipment` entries (`slot` and `itemEntry`) and `professions`
 (`skillId`, `name`, `value` and `max`).
 
