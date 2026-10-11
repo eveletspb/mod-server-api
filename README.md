@@ -151,6 +151,7 @@ details always hide deleted rows and return `404` for a deleted or missing GUID.
 | `GET` | `/api/v1/characters` | configured provider |
 | `GET` | `/api/v1/characters/{guid}` | configured provider |
 | `GET` | `/api/v1/characters/item-levels?guids=...` | configured provider |
+| `GET` | `/api/v1/characters/statistics` | configured provider |
 
 List parameters:
 
@@ -200,6 +201,9 @@ The item-level endpoint accepts either up to 100 `guids` or up to 40 exact
 `names`. It returns the rounded average `ItemLevel` for equipped inventory slots,
 excluding shirt and tabard. It reads inventory from Character DB and item
 templates from World DB inside the module.
+
+The statistics endpoint returns average latency (`null` when no characters are
+online) and online Alliance/Horde character counts.
 
 Online status, map, zone and coordinates are taken from the current runtime
 snapshot for online characters. Other character fields are read from DB and

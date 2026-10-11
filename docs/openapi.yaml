@@ -202,6 +202,28 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/CharacterUnavailable'}
+  /api/v1/characters/statistics:
+    get:
+      tags: [Characters]
+      summary: Read online character latency and faction counts
+      responses:
+        '200':
+          description: Current online character statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [latencyMs, factionCounts]
+                properties:
+                  latencyMs: {type: integer, nullable: true}
+                  factionCounts:
+                    type: object
+                    required: [alliance, horde]
+                    properties:
+                      alliance: {type: integer, minimum: 0}
+                      horde: {type: integer, minimum: 0}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/CharacterUnavailable'}
   /api/v1/groups:
     get:
       tags: [Groups]

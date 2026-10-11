@@ -1191,6 +1191,13 @@ namespace ServerApi
                             R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
                     return;
                 }
+                if (path == "/api/v1/characters/statistics")
+                {
+                    if (!_charactersApi || !_charactersApi->Statistics(std::move(completion)))
+                        WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    return;
+                }
                 if (path == "/api/v1/characters")
                 {
                     if (!_charactersApi || !_charactersApi->List(target, std::move(completion)))

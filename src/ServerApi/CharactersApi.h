@@ -49,6 +49,7 @@ namespace ServerApi
         bool List(std::string target, Completion completion);
         bool Get(uint32_t guid, Completion completion);
         bool ItemLevels(std::string target, Completion completion);
+        bool Statistics(Completion completion);
 
     private:
         struct BotTypeSnapshot;

@@ -1232,6 +1232,40 @@ namespace ServerApi
         return true;
     }
 
+    bool CharactersApi::Statistics(Completion completion)
+    {
+        if (!ReserveRequest())
+            return false;
+        auto completionState = std::make_shared<Completion>(std::move(completion));
+        std::string const sql = "SELECT AVG(latency), "
+            "SUM(race IN (1, 3, 4, 7, 11)), SUM(race IN (2, 5, 6, 8, 10)) "
+            "FROM characters WHERE online = 1 AND deleteDate IS NULL";
+        QueryOrProbe(std::move(sql), [this, completionState](QueryResult result) mutable
+        {
+            if (!result)
+            {
+                CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable",
+                    "DATABASE_UNAVAILABLE"));
+                return;
+            }
+            Field* fields = result->Fetch();
+            std::string latency = "null";
+            if (!fields[0].IsNull())
+                latency = std::to_string(static_cast<int>(std::lround(fields[0].Get<double>())));
+            uint64_t const alliance = fields[1].IsNull() ? 0 : fields[1].Get<uint64>();
+            uint64_t const horde = fields[2].IsNull() ? 0 : fields[2].Get<uint64>();
+            std::string body = "{\"latencyMs\":" + latency +
+                ",\"factionCounts\":{\"alliance\":" + std::to_string(alliance) +
+                ",\"horde\":" + std::to_string(horde) + "}}";
+            CompleteRequest(std::move(*completionState), {200, "OK", std::move(body)});
+        }, [this, completionState]() mutable
+        {
+            CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable",
+                "DATABASE_UNAVAILABLE"));
+        });
+        return true;
+    }
+
     void CharactersApi::BeginProfileQueries(std::shared_ptr<ProfileState> state)
     {
         QueryEquipment(std::move(state));
