@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 namespace ServerApi
@@ -36,7 +37,7 @@ namespace ServerApi
     public:
         using Completion = std::function<void(ApiResponse)>;
 
-        explicit CharactersApi(boost::asio::io_context& ioContext);
+        explicit CharactersApi(boost::asio::strand<boost::asio::io_context::executor_type> strand);
         ~CharactersApi();
 
         CharactersApi(CharactersApi const&) = delete;
@@ -74,7 +75,7 @@ namespace ServerApi
         void StopBotTypeWorker();
         void RefreshBotTypes();
 
-        boost::asio::io_context& _ioContext;
+        boost::asio::strand<boost::asio::io_context::executor_type> _strand;
         boost::asio::steady_timer _callbackTimer;
         QueryCallbackProcessor _queryCallbacks;
         uint32_t _activeRequests = 0;

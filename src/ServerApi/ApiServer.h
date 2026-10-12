@@ -12,9 +12,11 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/strand.hpp>
 
 namespace ServerApi
 {
@@ -42,12 +44,14 @@ namespace ServerApi
 
         boost::asio::io_context _ioContext;
         boost::asio::ip::tcp::acceptor _acceptor{_ioContext};
+        boost::asio::strand<boost::asio::io_context::executor_type> _charactersApiStrand =
+            boost::asio::make_strand(_ioContext);
         Config _config;
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
         std::shared_ptr<CharactersApi> _charactersApi;
         std::shared_ptr<WebSocketPublishPool> _webSocketPublishPool;
-        std::thread _thread;
+        std::vector<std::thread> _threads;
         std::atomic_bool _running = false;
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients = std::make_shared<std::atomic_uint32_t>(0);
         std::shared_ptr<std::atomic_uint32_t> _sseClients = std::make_shared<std::atomic_uint32_t>(0);

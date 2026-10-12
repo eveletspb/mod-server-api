@@ -393,7 +393,11 @@ Each SSE `data:` field contains the same JSON event object shown above. The
 server sends a comment heartbeat every 15 seconds. Reconnecting clients receive
 new events only; the API does not persist or replay missed events. Slow clients
 have a bounded per-connection queue and are disconnected when it fills. SSE
-limits are independent from WebSocket:
+shares the configured `ServerApi.IOThreads` pool with HTTP and WebSocket I/O;
+each connection stays serialized while independent connections run concurrently.
+SSE writes combine up to 64 queued events or 64 KiB into one socket write.
+Character database API callbacks use a separate strand to keep their shared
+request state serialized. SSE limits are independent from WebSocket:
 
 ```ini
 ServerApi.SSE.Enable = 1
@@ -512,6 +516,7 @@ ServerApi.BindAddress = "127.0.0.1"
 ServerApi.Port = 7878
 ServerApi.MaxRequestBytes = 1048576
 ServerApi.MaxRequestsPerSecond = 1000
+ServerApi.IOThreads = 4
 ServerApi.PositionUpdates.IntervalMs = 1000
 ServerApi.CombatSnapshot.IntervalMs = 2000
 ServerApi.WebSocket.Enable = 1

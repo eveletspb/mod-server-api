@@ -91,6 +91,7 @@ namespace
         LOG_INFO("server.loading", ">> Authentication provider: {}", config.authProvider);
         LOG_INFO("server.loading", ">> HTTP limits: request={} bytes, rate={}/s (0 = unlimited)",
             config.maxRequestBytes, config.maxRequestsPerSecond);
+        LOG_INFO("server.loading", ">> IO threads: {}", config.ioThreads);
         LOG_INFO("server.loading", ">> WebSocket: {}", config.webSocketEnabled ? "enabled" : "disabled");
         LOG_INFO("server.loading", ">> SSE: {}", config.sseEnabled ? "enabled" : "disabled");
         if (config.sseEnabled)

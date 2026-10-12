@@ -1079,7 +1079,7 @@ namespace ServerApi
                 return;
             }
 
-            state->character = ReadCharacter(result->Fetch());
+            state->character = ReadCharacter(result->Fetch(), true);
             BeginProfileQueries(state);
         }, [this, state]
         {

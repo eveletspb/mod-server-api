@@ -37,6 +37,7 @@
 
 #include <boost/asio/post.hpp>
 #include <boost/asio/ip/address.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core.hpp>
@@ -547,10 +548,25 @@ namespace ServerApi
             {
                 if (_writeQueue.empty() || _closed)
                     return;
+
+                constexpr std::size_t MaxBatchMessages = 64;
+                constexpr std::size_t MaxBatchBytes = 64 * 1024;
+                std::string batch;
+                std::size_t batchMessages = 0;
+                for (std::string const& chunk : _writeQueue)
+                {
+                    if (batchMessages == MaxBatchMessages ||
+                        (!batch.empty() && batch.size() + chunk.size() > MaxBatchBytes))
+                        break;
+                    batch += chunk;
+                    ++batchMessages;
+                }
+
                 _writeInProgress = true;
                 auto self = shared_from_this();
-                boost::asio::async_write(_socket, boost::asio::buffer(_writeQueue.front()),
-                    [self](boost::system::error_code error, std::size_t)
+                boost::asio::async_write(_socket, boost::asio::buffer(batch),
+                    [self, batch = std::move(batch), batchMessages](
+                        boost::system::error_code error, std::size_t bytesWritten)
                 {
                     self->_writeInProgress = false;
                     if (error)
@@ -558,9 +574,17 @@ namespace ServerApi
                         self->CloseOnExecutor("event_write_error", error.message());
                         return;
                     }
-                    std::size_t const bytes = self->_writeQueue.front().size();
-                    self->_writeQueue.pop_front();
-                    self->ReleaseMessage(bytes);
+                    if (bytesWritten != batch.size())
+                    {
+                        self->CloseOnExecutor("event_write_error", "incomplete async_write");
+                        return;
+                    }
+                    for (std::size_t index = 0; index < batchMessages; ++index)
+                    {
+                        std::size_t const bytes = self->_writeQueue.front().size();
+                        self->_writeQueue.pop_front();
+                        self->ReleaseMessage(bytes);
+                    }
                     self->WriteNext();
                 });
             }
@@ -959,13 +983,15 @@ namespace ServerApi
             std::shared_ptr<std::atomic_uint32_t> sseClients,
             std::shared_ptr<RequestRateLimiter> requestRateLimiter,
             std::shared_ptr<CharactersApi> charactersApi,
+            boost::asio::strand<boost::asio::io_context::executor_type> charactersApiStrand,
             std::shared_ptr<WebSocketPublishPool> publishPool,
             std::shared_ptr<AuthenticationProvider> authenticationProvider,
             bool authenticationRequired)
             : _socket(std::move(socket)), _config(std::move(config)),
               _webSocketClients(std::move(webSocketClients)), _sseClients(std::move(sseClients)),
               _requestRateLimiter(std::move(requestRateLimiter)),
-              _charactersApi(std::move(charactersApi)), _publishPool(std::move(publishPool)),
+              _charactersApi(std::move(charactersApi)), _charactersApiStrand(std::move(charactersApiStrand)),
+              _publishPool(std::move(publishPool)),
               _authenticationProvider(std::move(authenticationProvider)),
               _authenticationRequired(authenticationRequired) { }
 
@@ -1170,52 +1196,67 @@ namespace ServerApi
                 if (!RequireMethod(method, "GET"))
                     return;
 
-                std::weak_ptr<HttpSession> weakSelf = weak_from_this();
-                auto completion = [weakSelf](ApiResponse response)
+                uint32_t guid = 0;
+                if (path != "/api/v1/characters" &&
+                    path != "/api/v1/characters/item-levels" &&
+                    path != "/api/v1/characters/statistics")
                 {
-                    if (auto self = weakSelf.lock())
+                    uint64_t parsedGuid = 0;
+                    if (!ParseResourceId(path, "/api/v1/characters/", parsedGuid) || parsedGuid == 0 ||
+                        parsedGuid > std::numeric_limits<uint32_t>::max())
                     {
-                        boost::asio::post(self->_socket.get_executor(),
-                            [self, response = std::move(response)]() mutable
-                        {
-                            self->WriteResponse(response.status, response.reason, response.body);
-                        });
+                        WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_GUID"}})");
+                        return;
                     }
+                    guid = static_cast<uint32_t>(parsedGuid);
+                }
+
+                auto self = shared_from_this();
+                std::shared_ptr<CharactersApi> charactersApi = _charactersApi;
+                auto completion = [self](ApiResponse response)
+                {
+                    boost::asio::post(self->_socket.get_executor(),
+                        [self, response = std::move(response)]() mutable
+                    {
+                        self->WriteResponse(response.status, response.reason, response.body);
+                    });
                 };
+                auto queueFull = [self]
+                {
+                    boost::asio::post(self->_socket.get_executor(), [self]
+                    {
+                        self->WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    });
+                };
+                std::string requestPath = path;
+                std::string requestTarget = target;
+                boost::asio::post(_charactersApiStrand,
+                    [charactersApi,
+                        requestPath = std::move(requestPath),
+                        requestTarget = std::move(requestTarget), guid,
+                        completion = std::move(completion),
+                        queueFull = std::move(queueFull)]() mutable
+                {
+                    if (!charactersApi)
+                    {
+                        queueFull();
+                        return;
+                    }
 
-                if (path == "/api/v1/characters/item-levels")
-                {
-                    if (!_charactersApi ||
-                        !_charactersApi->ItemLevels(target, std::move(completion)))
-                        WriteResponse(503, "Service Unavailable",
-                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
-                    return;
-                }
-                if (path == "/api/v1/characters/statistics")
-                {
-                    if (!_charactersApi || !_charactersApi->Statistics(std::move(completion)))
-                        WriteResponse(503, "Service Unavailable",
-                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
-                    return;
-                }
-                if (path == "/api/v1/characters")
-                {
-                    if (!_charactersApi || !_charactersApi->List(target, std::move(completion)))
-                        WriteResponse(503, "Service Unavailable",
-                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
-                    return;
-                }
+                    bool accepted = false;
+                    if (requestPath == "/api/v1/characters/item-levels")
+                        accepted = charactersApi->ItemLevels(requestTarget, std::move(completion));
+                    else if (requestPath == "/api/v1/characters/statistics")
+                        accepted = charactersApi->Statistics(std::move(completion));
+                    else if (requestPath == "/api/v1/characters")
+                        accepted = charactersApi->List(requestTarget, std::move(completion));
+                    else
+                        accepted = charactersApi->Get(guid, std::move(completion));
 
-                uint64_t parsedGuid = 0;
-                if (!ParseResourceId(path, "/api/v1/characters/", parsedGuid) || parsedGuid == 0 ||
-                    parsedGuid > std::numeric_limits<uint32_t>::max())
-                {
-                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_GUID"}})");
-                    return;
-                }
-                if (!_charactersApi || !_charactersApi->Get(static_cast<uint32_t>(parsedGuid), std::move(completion)))
-                    WriteResponse(503, "Service Unavailable",
-                        R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    if (!accepted)
+                        queueFull();
+                });
                 return;
             }
             else if (path == "/api/v1/groups" || path.rfind("/api/v1/groups/", 0) == 0)
@@ -1433,6 +1474,7 @@ namespace ServerApi
         std::shared_ptr<std::atomic_uint32_t> _sseClients;
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter;
         std::shared_ptr<CharactersApi> _charactersApi;
+        boost::asio::strand<boost::asio::io_context::executor_type> _charactersApiStrand;
         std::shared_ptr<WebSocketPublishPool> _publishPool;
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
@@ -1447,6 +1489,14 @@ namespace ServerApi
     {
         if (_running.exchange(true))
             return true;
+
+        if (config.ioThreads == 0 || config.ioThreads > 32)
+        {
+            LOG_ERROR("server-api.config",
+                "ServerApi.IOThreads must be between 1 and 32");
+            _running = false;
+            return false;
+        }
 
         _config = std::move(config);
         _ioContext.restart();
@@ -1514,15 +1564,14 @@ namespace ServerApi
             return false;
         }
 
-        _charactersApi = std::make_shared<CharactersApi>(_ioContext);
+        _charactersApi = std::make_shared<CharactersApi>(_charactersApiStrand);
         _charactersApi->Start();
         _webSocketPublishPool = std::make_shared<WebSocketPublishPool>(_config.maxWebSocketPublishQueue);
         _webSocketPublishPool->Start();
         AcceptNext();
-        _thread = std::thread([this]
-        {
-            _ioContext.run();
-        });
+        _threads.reserve(_config.ioThreads);
+        for (uint32_t index = 0; index < _config.ioThreads; ++index)
+            _threads.emplace_back([this] { _ioContext.run(); });
 
         LOG_INFO("server-api.http", "Server API listening on {}:{}", _config.bindAddress, _config.port);
         return true;
@@ -1533,11 +1582,11 @@ namespace ServerApi
         if (!_running.exchange(false))
             return;
 
-        if (_charactersApi && _thread.joinable())
+        if (_charactersApi && !_threads.empty())
         {
             auto stopped = std::make_shared<std::promise<void>>();
             std::future<void> completed = stopped->get_future();
-            boost::asio::post(_ioContext, [charactersApi = _charactersApi, stopped]
+            boost::asio::post(_charactersApiStrand, [charactersApi = _charactersApi, stopped]
             {
                 charactersApi->Stop();
                 stopped->set_value();
@@ -1546,8 +1595,10 @@ namespace ServerApi
         }
 
         _ioContext.stop();
-        if (_thread.joinable())
-            _thread.join();
+        for (std::thread& thread : _threads)
+            if (thread.joinable())
+                thread.join();
+        _threads.clear();
 
         if (_webSocketPublishPool)
             _webSocketPublishPool->Stop();
@@ -1564,12 +1615,13 @@ namespace ServerApi
 
     void ApiServer::AcceptNext()
     {
-        _acceptor.async_accept([this](boost::system::error_code error, boost::asio::ip::tcp::socket socket)
+        _acceptor.async_accept(boost::asio::make_strand(_ioContext),
+            [this](boost::system::error_code error, boost::asio::ip::tcp::socket socket)
         {
             if (!error)
                 std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
-                    _sseClients, _requestRateLimiter, _charactersApi, _webSocketPublishPool, _authenticationProvider,
-                    _authenticationRequired)->Start();
+                    _sseClients, _requestRateLimiter, _charactersApi, _charactersApiStrand,
+                    _webSocketPublishPool, _authenticationProvider, _authenticationRequired)->Start();
 
             if (_running)
                 AcceptNext();

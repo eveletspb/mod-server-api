@@ -29,6 +29,8 @@ ServerApi.Port = 7878
 # Maximum HTTP request size accepted by the MVP listener.
 ServerApi.MaxRequestBytes = 1048576
 ServerApi.MaxRequestsPerSecond = 1000
+# Number of HTTP, SSE, and WebSocket I/O worker threads (1-32).
+ServerApi.IOThreads = 4
 ServerApi.PositionUpdates.IntervalMs = 1000
 ServerApi.CombatSnapshot.IntervalMs = 2000
 

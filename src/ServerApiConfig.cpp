@@ -17,6 +17,7 @@ namespace ServerApi
         config.port = sConfigMgr->GetOption<uint16_t>("ServerApi.Port", 7878);
         config.maxRequestBytes = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestBytes", 1024 * 1024);
         config.maxRequestsPerSecond = sConfigMgr->GetOption<uint32_t>("ServerApi.MaxRequestsPerSecond", 1000);
+        config.ioThreads = sConfigMgr->GetOption<uint32_t>("ServerApi.IOThreads", 4);
         config.authProvider = sConfigMgr->GetOption<std::string>("ServerApi.Auth.Provider", "none");
         config.webSocketEnabled = sConfigMgr->GetOption<bool>("ServerApi.WebSocket.Enable", true);
         config.sseEnabled = sConfigMgr->GetOption<bool>("ServerApi.SSE.Enable", true);
@@ -56,6 +57,12 @@ namespace ServerApi
         if (config.maxRequestBytes == 0)
         {
             LOG_ERROR("server-api.config", "ServerApi.MaxRequestBytes must be greater than zero");
+            config.enabled = false;
+        }
+
+        if (config.ioThreads == 0 || config.ioThreads > 32)
+        {
+            LOG_ERROR("server-api.config", "ServerApi.IOThreads must be between 1 and 32");
             config.enabled = false;
         }
 
