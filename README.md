@@ -152,6 +152,8 @@ details always hide deleted rows and return `404` for a deleted or missing GUID.
 | `GET` | `/api/v1/characters/{guid}` | configured provider |
 | `GET` | `/api/v1/characters/item-levels?guids=...` | configured provider |
 | `GET` | `/api/v1/characters/statistics` | configured provider |
+| `GET` | `/api/v1/instance-binds` | configured provider |
+| `POST` | `/api/v1/instance-binds/reset?mapId=...&difficulty=...&guids=...` | configured provider |
 
 List parameters:
 
@@ -166,7 +168,7 @@ List parameters:
 | `minLevel`, `maxLevel` | Inclusive level bounds |
 | `guids` | Comma-separated exact GUID list, at most 100 entries |
 | `names` | Comma-separated exact character names, at most 40 entries |
-| `includeTalents` | Include active talent spell IDs for local specialization resolution |
+| `includeTalents` | Include active talent spell IDs and server-resolved specialization summary |
 
 Filters are combined with `AND`. Unknown or repeated parameters, invalid values,
 and `minLevel > maxLevel` return `400 INVALID_FILTER`. The cursor is an
@@ -193,7 +195,9 @@ Each list entry includes `guid`, `accountId`, `name`, `race`, `class`, `gender`,
 `mapId`, `zoneId` and `location` (`mapId`, `zoneId`, `x`, `y`, `z` and
 `orientation`). `available` is true when the character is offline or not in a
 group. With `includeTalents=true`, entries also contain `talentSpells`, the
-active specialization's learned spell IDs. A profile adds `xp`, `money`, `talents` (`activeGroup` and
+active specialization's learned spell IDs, plus `spec`, `talentPoints` (points
+spent in each talent tree) and `suggestedRoles`, calculated from server DBC
+data. A profile always includes these talent fields and adds `xp`, `money`, `talents` (`activeGroup` and
 `totalGroups`), `equipment` entries (`slot` and `itemEntry`) and `professions`
 (`skillId`, `name`, `value` and `max`).
 
@@ -204,6 +208,36 @@ templates from World DB inside the module.
 
 The statistics endpoint returns average latency (`null` when no characters are
 online) and online Alliance/Horde character counts.
+
+### Instance binds
+
+`GET /api/v1/instance-binds` returns the current realm's personal dungeon and
+raid binds for online and offline characters. It reads `character_instance`,
+`instance` and character identity/status fields; `inInstance` is derived from
+the live character snapshot. Each row includes `guid`, `name`, `class`, `level`,
+`online`, `mapId`, `mapName`, `isRaid`, `difficulty`, `permanent`, `extended`,
+`resetAt` (Unix seconds), `completedEncounters` and `inInstance`.
+
+`POST /api/v1/instance-binds/reset` accepts `mapId`, `difficulty` and a
+comma-separated `guids` query parameter (1–100 unique nonzero GUIDs). The
+operation is queued on the world thread and unbinds only the requested
+map/difficulty through `InstanceSaveMgr::PlayerUnbindInstance`; it does not
+change the global instance reset schedule or other character binds. The API
+returns one result per GUID with `status` (`reset`, `skipped` or `failed`) and a reason
+when skipped. A character currently in combat, inside that map, or no longer
+bound is skipped. In cluster mode, a worldserver that does not own the map also
+returns a skipped result. Database/request queue errors are returned as API errors, not
+as successful per-character results. In cluster mode, GET reports database
+binds while reset only runs on a worldserver assigned the requested map.
+
+```json
+{
+  "results": [
+    {"guid": 123, "status": "reset"},
+    {"guid": 456, "status": "skipped", "reason": "Character is in combat."}
+  ]
+}
+```
 
 Online status, map, zone and coordinates are taken from the current runtime
 snapshot for online characters. Other character fields are read from DB and
@@ -391,11 +425,23 @@ GET /sse/v1/events?events=server.*,player.*
 
 Each SSE `data:` field contains the same JSON event object shown above. The
 server sends a comment heartbeat every 15 seconds. Reconnecting clients receive
-new events only; the API does not persist or replay missed events. Slow clients
-have a bounded per-connection queue and are disconnected when it fills. SSE
-shares the configured `ServerApi.IOThreads` pool with HTTP and WebSocket I/O;
-each connection stays serialized while independent connections run concurrently.
-SSE writes combine up to 64 queued events or 64 KiB into one socket write.
+events from the current server process. Events named `rde.run.log.*` include a
+process-specific `streamEpoch` and a server-wide `streamSequence` in the
+envelope; SSE also sets `id: <streamEpoch>:<streamSequence>`. Reconnecting
+clients can send that cursor in `Last-Event-ID`. The EventBus retains up to
+8,192 RDE events or 16 MiB, whichever limit is reached first, including events
+dropped from its dispatch queue. Replay sends retained events in cursor order,
+streaming them through the bounded per-client queue; live events wait behind the
+replay in a separately bounded buffer. A cursor older than retention resumes at
+the oldest available event, exposing a sequence gap. A server restart changes
+the epoch, so events from the previous process are not replayed. Other event
+types and older servers omit the cursor fields.
+
+Slow clients have a bounded per-connection queue and are disconnected when it
+fills. SSE shares the configured `ServerApi.IOThreads` pool with HTTP and
+WebSocket I/O; each connection stays serialized while independent connections
+run concurrently. SSE writes combine up to 64 queued events or 64 KiB into one
+socket write.
 Character database API callbacks use a separate strand to keep their shared
 request state serialized. SSE limits are independent from WebSocket:
 

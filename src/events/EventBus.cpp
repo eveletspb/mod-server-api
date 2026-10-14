@@ -18,14 +18,35 @@ namespace ServerApi
 {
     namespace
     {
+        constexpr std::size_t MaxRdeStreamHistoryEvents = 8192;
+        constexpr std::size_t MaxRdeStreamHistoryBytes = 16 * 1024 * 1024;
+
         int64_t NowMilliseconds()
         {
             auto const now = std::chrono::system_clock::now();
             return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         }
+
+        std::string CreateRdeStreamEpoch()
+        {
+            auto const systemNow = std::chrono::system_clock::now().time_since_epoch();
+            auto const steadyNow = std::chrono::steady_clock::now().time_since_epoch();
+            auto const systemMicros = std::chrono::duration_cast<std::chrono::microseconds>(systemNow).count();
+            auto const steadyNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(steadyNow).count();
+            return std::to_string(systemMicros) + "-" + std::to_string(steadyNanos);
+        }
+
+        std::size_t ApproximateEventBytes(ApiEvent const& event)
+        {
+            std::size_t bytes = event.type.size() + event.streamEpoch.size() + 96;
+            for (auto const& [key, value] : event.data)
+                bytes += key.size() + value.size() + 8;
+            return bytes;
+        }
     }
 
-    EventBus::EventBus(std::size_t maxQueueSize) : _maxQueueSize(maxQueueSize) { }
+    EventBus::EventBus(std::size_t maxQueueSize)
+        : _maxQueueSize(maxQueueSize), _rdeStreamEpoch(CreateRdeStreamEpoch()) { }
 
     EventBus::~EventBus()
     {
@@ -72,6 +93,32 @@ namespace ServerApi
         if (!_running)
             return false;
 
+        bool const isRdeStreamEvent = event.type.rfind("rde.run.log.", 0) == 0;
+        if (isRdeStreamEvent)
+        {
+            event.streamSequence = ++_rdeStreamSequence;
+            event.streamEpoch = _rdeStreamEpoch;
+        }
+
+        if (event.timestampMilliseconds == 0)
+            event.timestampMilliseconds = NowMilliseconds();
+
+        if (isRdeStreamEvent)
+        {
+            std::size_t const eventBytes = ApproximateEventBytes(event);
+            if (eventBytes <= MaxRdeStreamHistoryBytes)
+            {
+                _rdeStreamHistory.push_back(event);
+                _rdeStreamHistoryBytes += eventBytes;
+                while (_rdeStreamHistory.size() > MaxRdeStreamHistoryEvents ||
+                    _rdeStreamHistoryBytes > MaxRdeStreamHistoryBytes)
+                {
+                    _rdeStreamHistoryBytes -= ApproximateEventBytes(_rdeStreamHistory.front());
+                    _rdeStreamHistory.pop_front();
+                }
+            }
+        }
+
         if (_queue.size() >= _maxQueueSize)
         {
             if (event.priority == EventPriority::Telemetry)
@@ -93,9 +140,6 @@ namespace ServerApi
             ++_droppedCount;
         }
 
-        if (event.timestampMilliseconds == 0)
-            event.timestampMilliseconds = NowMilliseconds();
-
         _queue.push_back(std::move(event));
         _condition.notify_one();
         return true;
@@ -107,6 +151,52 @@ namespace ServerApi
         SubscriptionId const id = _nextSubscriptionId++;
         _subscriptions.push_back({id, std::move(eventPattern), std::move(handler)});
         return id;
+    }
+
+    EventReplay EventBus::SubscribeFrom(std::vector<std::string> eventPatterns, EventHandler handler,
+        std::string const& streamEpoch, uint64_t afterSequence, std::size_t maxEvents,
+        std::size_t maxBytes)
+    {
+        EventReplay result;
+        std::lock_guard<std::mutex> queueLock(_queueMutex);
+        std::lock_guard<std::mutex> subscriptionLock(_subscriptionsMutex);
+
+        bool const matchingEpoch = !streamEpoch.empty() && streamEpoch == _rdeStreamEpoch &&
+            afterSequence <= _rdeStreamSequence;
+        bool const historyCoversCursor = _rdeStreamHistory.empty()
+            ? afterSequence == _rdeStreamSequence
+            : afterSequence >= _rdeStreamHistory.front().streamSequence - 1;
+        result.cursorAccepted = matchingEpoch && historyCoversCursor;
+        if (matchingEpoch && maxEvents > 0 && maxBytes > 0)
+        {
+            std::size_t replayBytes = 0;
+            for (auto event = _rdeStreamHistory.rbegin(); event != _rdeStreamHistory.rend(); ++event)
+            {
+                if (event->streamSequence <= afterSequence)
+                    break;
+                bool matches = std::any_of(eventPatterns.begin(), eventPatterns.end(), [&event](std::string const& pattern)
+                {
+                    return Matches(pattern, event->type);
+                });
+                if (!matches)
+                    continue;
+
+                std::size_t const eventBytes = ApproximateEventBytes(*event);
+                if (result.events.size() >= maxEvents || eventBytes > maxBytes - replayBytes)
+                    break;
+                replayBytes += eventBytes;
+                result.events.push_back(*event);
+            }
+            std::reverse(result.events.begin(), result.events.end());
+        }
+
+        for (std::string& pattern : eventPatterns)
+        {
+            SubscriptionId const id = _nextSubscriptionId++;
+            _subscriptions.push_back({id, std::move(pattern), handler});
+            result.subscriptions.push_back(id);
+        }
+        return result;
     }
 
     void EventBus::Unsubscribe(SubscriptionId subscriptionId)

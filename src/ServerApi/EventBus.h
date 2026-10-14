@@ -31,10 +31,19 @@ namespace ServerApi
         int64_t timestampMilliseconds = 0;
         std::unordered_map<std::string, std::string> data;
         EventPriority priority = EventPriority::Normal;
+        std::string streamEpoch;
+        uint64_t streamSequence = 0;
     };
 
     using SubscriptionId = uint64_t;
     using EventHandler = std::function<void(ApiEvent const&)>;
+
+    struct EventReplay
+    {
+        std::vector<ApiEvent> events;
+        std::vector<SubscriptionId> subscriptions;
+        bool cursorAccepted = false;
+    };
 
     class EventBus
     {
@@ -51,6 +60,9 @@ namespace ServerApi
 
         bool Publish(ApiEvent event);
         SubscriptionId Subscribe(std::string eventPattern, EventHandler handler);
+        EventReplay SubscribeFrom(std::vector<std::string> eventPatterns, EventHandler handler,
+            std::string const& streamEpoch, uint64_t afterSequence, std::size_t maxEvents,
+            std::size_t maxBytes);
         void Unsubscribe(SubscriptionId subscriptionId);
 
         [[nodiscard]] std::size_t QueueSize() const;
@@ -76,6 +88,10 @@ namespace ServerApi
         std::thread _thread;
         SubscriptionId _nextSubscriptionId = 1;
         uint64_t _droppedCount = 0;
+        std::string _rdeStreamEpoch;
+        uint64_t _rdeStreamSequence = 0;
+        std::deque<ApiEvent> _rdeStreamHistory;
+        std::size_t _rdeStreamHistoryBytes = 0;
         bool _running = false;
     };
 

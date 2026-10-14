@@ -42,6 +42,18 @@ server does not acknowledge receipt or replay missed events.
 }
 ```
 
+Events named `rde.run.log.*` include a process-specific `streamEpoch` and a
+server-wide `streamSequence` number in the envelope. The sequence is assigned
+before the EventBus queue, so it also identifies events dropped by queue
+backpressure. SSE sends `id: <streamEpoch>:<streamSequence>` and replays after a
+matching `Last-Event-ID` cursor. The EventBus keeps at most 8,192 RDE events or
+16 MiB, whichever limit is reached first. Replay is sent incrementally through
+the bounded per-client SSE queue; live events arriving during replay wait behind
+retained events in a separately bounded buffer. A cursor older than the retained
+window resumes from the oldest available event and exposes a sequence gap. A
+server restart changes the epoch and cannot replay the previous process. Other
+event types and older servers omit these fields.
+
 Current events:
 
 | Event | Data |

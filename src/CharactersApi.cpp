@@ -4,13 +4,20 @@
 
 #include "ServerApi/CharactersApi.h"
 
+#include "ServerApi/CommandQueue.h"
 #include "ServerApi/HttpUtils.h"
 #include "ServerApi/ServerSnapshot.h"
 
 #include "DatabaseEnv.h"
+#include "DataStores/DBCStores.h"
 #include "Field.h"
+#include "Instances/InstanceSaveMgr.h"
 #include "Log.h"
+#include "Map.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
 #include "QueryResult.h"
+#include "TC9Sidecar/TC9Sidecar.h"
 
 #ifdef MOD_PLAYERBOTS
 #include "Db/PlayerbotsDatabase.h"
@@ -27,6 +34,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -90,6 +98,10 @@ namespace ServerApi
             bool available = false;
             bool hasTalentSpells = false;
             std::vector<uint32_t> talentSpells;
+            bool hasTalentSummary = false;
+            std::string spec;
+            std::array<uint32_t, 3> talentPoints{};
+            std::vector<std::string_view> suggestedRoles;
         };
 
         struct EquippedItem
@@ -170,6 +182,116 @@ namespace ServerApi
                 return true;
             }
             return false;
+        }
+
+        std::string TalentSpecName(uint8_t playerClass, uint32_t tree)
+        {
+            static constexpr std::array<std::array<std::string_view, 3>, 12> Specs = {{
+                {"", "", ""},
+                {"Arms", "Fury", "Protection"},
+                {"Holy", "Protection", "Retribution"},
+                {"Beast Mastery", "Marksmanship", "Survival"},
+                {"Assassination", "Combat", "Subtlety"},
+                {"Discipline", "Holy", "Shadow"},
+                {"Blood", "Frost", "Unholy"},
+                {"Elemental", "Enhancement", "Restoration"},
+                {"Arcane", "Fire", "Frost"},
+                {"Affliction", "Demonology", "Destruction"},
+                {"", "", ""},
+                {"Balance", "Feral Combat", "Restoration"}
+            }};
+            if (playerClass == 0 || playerClass >= Specs.size() || tree >= 3)
+                return {};
+            return std::string(Specs[playerClass][tree]);
+        }
+
+        std::vector<std::string_view> SuggestedRoles(uint8_t playerClass, int8_t tree)
+        {
+            std::vector<std::string_view> roles;
+            switch (playerClass)
+            {
+                case 5:
+                    if (tree == 0 || tree == 1)
+                        roles.push_back("healer");
+                    else if (tree == 2)
+                        roles.push_back("dps");
+                    break;
+                case 7:
+                    if (tree == 2)
+                        roles.push_back("healer");
+                    else if (tree == 0 || tree == 1)
+                        roles.push_back("dps");
+                    break;
+                case 1:
+                    if (tree == 2)
+                        roles.push_back("tank");
+                    else if (tree == 0 || tree == 1)
+                        roles.push_back("dps");
+                    break;
+                case 2:
+                    if (tree == 0)
+                        roles.push_back("healer");
+                    else if (tree == 1)
+                        roles.push_back("tank");
+                    else if (tree == 2)
+                        roles.push_back("dps");
+                    break;
+                case 11:
+                    if (tree == 0)
+                        roles.push_back("dps");
+                    else if (tree == 1)
+                    {
+                        roles.push_back("tank");
+                        roles.push_back("dps");
+                    }
+                    else if (tree == 2)
+                        roles.push_back("healer");
+                    break;
+                case 6:
+                    if (tree == 0)
+                        roles.push_back("tank");
+                    else if (tree == 1 || tree == 2)
+                        roles.push_back("dps");
+                    break;
+                case 3:
+                case 4:
+                case 8:
+                case 9:
+                    roles.push_back("dps");
+                    break;
+                default:
+                    break;
+            }
+            return roles;
+        }
+
+        struct TalentSpellInfo
+        {
+            uint32_t tree = 0;
+            uint32_t rank = 0;
+            uint32_t classMask = 0;
+        };
+
+        std::unordered_map<uint32_t, TalentSpellInfo> const& TalentSpellLookup()
+        {
+            static std::unordered_map<uint32_t, TalentSpellInfo> const talents = []
+            {
+                std::unordered_map<uint32_t, TalentSpellInfo> result;
+                for (TalentEntry const* talent : sTalentStore)
+                {
+                    TalentTabEntry const* tab = sTalentTabStore.LookupEntry(talent->TalentTab);
+                    if (!tab)
+                        continue;
+                    for (std::size_t rank = 0; rank < talent->RankID.size(); ++rank)
+                    {
+                        if (talent->RankID[rank] != 0)
+                            result.emplace(talent->RankID[rank], TalentSpellInfo{
+                                tab->tabpage, static_cast<uint32_t>(rank + 1), tab->ClassMask});
+                    }
+                }
+                return result;
+            }();
+            return talents;
         }
 
         template <typename T>
@@ -429,6 +551,37 @@ namespace ServerApi
                         character.talentSpells.push_back(spell);
                     start = end + 1;
                 }
+
+                std::array<uint32_t, 3> pointsByTree{};
+                auto const& talentLookup = TalentSpellLookup();
+                for (uint32_t spell : character.talentSpells)
+                {
+                    auto const talent = talentLookup.find(spell);
+                    if (talent == talentLookup.end())
+                        continue;
+
+                    if (character.playerClass == 0 || character.playerClass > 32 ||
+                        (talent->second.classMask & (1u << (character.playerClass - 1))) == 0)
+                        continue;
+                    if (talent->second.tree < character.talentPoints.size())
+                        pointsByTree[talent->second.tree] += talent->second.rank;
+                }
+
+                character.hasTalentSummary = true;
+                character.talentPoints = pointsByTree;
+                uint32_t bestPoints = 0;
+                int8_t bestTree = -1;
+                for (std::size_t tree = 0; tree < pointsByTree.size(); ++tree)
+                {
+                    if (pointsByTree[tree] > bestPoints)
+                    {
+                        bestPoints = pointsByTree[tree];
+                        bestTree = static_cast<int8_t>(tree);
+                    }
+                }
+                if (bestTree >= 0)
+                    character.spec = TalentSpecName(character.playerClass, bestTree);
+                character.suggestedRoles = SuggestedRoles(character.playerClass, bestTree);
             }
             return character;
         }
@@ -585,6 +738,21 @@ namespace ServerApi
                 talentJson += ']';
                 body.insert(body.size() - 1, talentJson);
             }
+            if (character.hasTalentSummary)
+            {
+                std::string talentSummary = ",\"spec\":\"" + EscapeJson(character.spec) +
+                    "\",\"talentPoints\":[" + std::to_string(character.talentPoints[0]) + "," +
+                    std::to_string(character.talentPoints[1]) + "," +
+                    std::to_string(character.talentPoints[2]) + "],\"suggestedRoles\":[";
+                for (std::size_t index = 0; index < character.suggestedRoles.size(); ++index)
+                {
+                    if (index != 0)
+                        talentSummary += ',';
+                    talentSummary += "\"" + std::string(character.suggestedRoles[index]) + "\"";
+                }
+                talentSummary += ']';
+                body.insert(body.size() - 1, talentSummary);
+            }
             return body;
         }
 
@@ -705,8 +873,9 @@ namespace ServerApi
         bool finished = false;
     };
 
-    CharactersApi::CharactersApi(boost::asio::io_context& ioContext)
-        : _ioContext(ioContext), _callbackTimer(ioContext), _botTypes(std::make_shared<BotTypeSnapshot>()) { }
+    CharactersApi::CharactersApi(boost::asio::strand<boost::asio::io_context::executor_type> strand)
+        : _strand(std::move(strand)), _callbackTimer(_strand),
+          _botTypes(std::make_shared<BotTypeSnapshot>()) { }
 
     CharactersApi::~CharactersApi()
     {
@@ -1069,7 +1238,8 @@ namespace ServerApi
         if (player != players.end())
             state->runtime = *player;
 
-        std::string const sql = CharacterSelect("c.guid = " + std::to_string(guid) + " AND c.deleteDate IS NULL");
+        std::string const sql = CharacterSelect(
+            "c.guid = " + std::to_string(guid) + " AND c.deleteDate IS NULL", true);
         QueryOrProbe(std::move(sql), [this, state](QueryResult result)
         {
             if (!result)
@@ -1263,6 +1433,180 @@ namespace ServerApi
             CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable",
                 "DATABASE_UNAVAILABLE"));
         });
+        return true;
+    }
+
+    bool CharactersApi::InstanceBinds(Completion completion)
+    {
+        if (!ReserveRequest())
+            return false;
+
+        std::string const sql =
+            "SELECT c.guid, c.name, c.class, c.level, c.online, c.map, c.instance_id, "
+            "i.map, i.difficulty, ci.permanent, ci.extended, i.resettime, i.completedEncounters "
+            "FROM character_instance ci "
+            "JOIN characters c ON c.guid = ci.guid AND c.deleteDate IS NULL "
+            "JOIN instance i ON i.id = ci.instance "
+            "ORDER BY i.map, i.difficulty, c.name, c.guid";
+
+        auto completionState = std::make_shared<Completion>(std::move(completion));
+        if (!SubmitQuery(sql, [this, completionState](QueryResult result) mutable
+        {
+            if (!result)
+            {
+                CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable", "DATABASE_UNAVAILABLE"));
+                return;
+            }
+
+            std::string body = R"({"data":[)";
+            bool first = true;
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32_t const guid = fields[0].Get<uint32_t>();
+                std::string const name = fields[1].Get<std::string>();
+                uint8_t const playerClass = fields[2].Get<uint8_t>();
+                uint8_t const level = fields[3].Get<uint8_t>();
+                bool const online = fields[4].Get<uint8_t>() != 0;
+                uint32_t const currentMap = fields[5].Get<uint32_t>();
+                uint32_t const currentInstance = fields[6].Get<uint32_t>();
+                uint32_t const mapId = fields[7].Get<uint32_t>();
+                uint8_t const difficulty = fields[8].Get<uint8_t>();
+                bool const permanent = fields[9].Get<uint8_t>() != 0;
+                bool const extended = fields[10].Get<uint8_t>() != 0;
+                uint64_t const resetAt = fields[11].Get<uint64_t>();
+                uint32_t const completedEncounters = fields[12].Get<uint32_t>();
+
+                MapEntry const* mapEntry = sMapStore.LookupEntry(mapId);
+                bool const isRaid = mapEntry && mapEntry->IsRaid();
+                std::string mapName = mapEntry ? mapEntry->name[LOCALE_enUS] : std::string();
+                if (!first)
+                    body += ',';
+                first = false;
+                body += Acore::StringFormat(
+                    R"({{"guid":{},"name":"{}","class":{},"level":{},"online":{},"mapId":{},"mapName":"{}","isRaid":{},"difficulty":{},"permanent":{},"extended":{},"resetAt":{},"completedEncounters":{},"inInstance":{}}})",
+                    guid, EscapeJson(name), playerClass, level, online ? "true" : "false", mapId,
+                    EscapeJson(mapName), isRaid ? "true" : "false", difficulty,
+                    permanent ? "true" : "false", extended ? "true" : "false", resetAt,
+                    completedEncounters, online && currentMap == mapId && currentInstance != 0 ? "true" : "false");
+            } while (result->NextRow());
+            body += "]}";
+            CompleteRequest(std::move(*completionState), {200, "OK", std::move(body)});
+        }))
+            CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable", "DATABASE_UNAVAILABLE"));
+        return true;
+    }
+
+    bool CharactersApi::ResetInstanceBinds(std::string target, Completion completion)
+    {
+        uint32_t mapId = 0;
+        uint32_t parsedDifficulty = 0;
+        std::string const mapValue = QueryValue(target, "mapId");
+        std::string const difficultyValue = QueryValue(target, "difficulty");
+        std::string const guidValue = QueryValue(target, "guids");
+        std::vector<uint32_t> guids;
+        std::unordered_set<uint32_t> uniqueGUIDs;
+        std::size_t offset = 0;
+        while (offset < guidValue.size())
+        {
+            std::size_t const separator = guidValue.find(',', offset);
+            std::string_view const value(guidValue.data() + offset,
+                (separator == std::string::npos ? guidValue.size() : separator) - offset);
+            uint32_t guid = 0;
+            if (!ParseUnsigned(value, guid) || guid == 0 || !uniqueGUIDs.insert(guid).second || guids.size() >= 100 ||
+                (separator != std::string::npos && separator + 1 == guidValue.size()))
+            {
+                completion(MakeError(400, "Bad Request", "INVALID_GUIDS"));
+                return true;
+            }
+            guids.push_back(guid);
+            if (separator == std::string::npos)
+                break;
+            offset = separator + 1;
+        }
+
+        if (!ParseUnsigned(mapValue, mapId) || mapId == 0 ||
+            !ParseUnsigned(difficultyValue, parsedDifficulty) || parsedDifficulty >= MAX_DIFFICULTY || guids.empty())
+        {
+            completion(MakeError(400, "Bad Request", "INVALID_INSTANCE_BIND_RESET"));
+            return true;
+        }
+
+        Difficulty const difficulty = Difficulty(parsedDifficulty);
+        MapEntry const* mapEntry = sMapStore.LookupEntry(mapId);
+        if (!mapEntry || !GetMapDifficultyData(mapId, difficulty))
+        {
+            completion(MakeError(400, "Bad Request", "INVALID_INSTANCE_DIFFICULTY"));
+            return true;
+        }
+        if (mapEntry->IsRaid() ? parsedDifficulty >= MAX_RAID_DIFFICULTY : parsedDifficulty >= MAX_DUNGEON_DIFFICULTY)
+        {
+            completion(MakeError(400, "Bad Request", "INVALID_INSTANCE_DIFFICULTY"));
+            return true;
+        }
+        if (!ReserveRequest())
+            return false;
+
+        auto completionState = std::make_shared<Completion>(std::move(completion));
+        bool const queued = GetCommandQueue().Enqueue([this, completionState, guids = std::move(guids), mapId, difficulty]() mutable
+        {
+            std::string body = R"({"results":[)";
+            bool first = true;
+            for (uint32_t guid : guids)
+            {
+                ObjectGuid const playerGuid = ObjectGuid::Create<HighGuid::Player>(guid);
+                Player* player = ObjectAccessor::FindConnectedPlayer(playerGuid);
+                InstancePlayerBind* bind = sInstanceSaveMgr->PlayerGetBoundInstance(playerGuid, mapId, difficulty);
+                std::string status = "reset";
+                std::string reason;
+                if (!bind)
+                {
+                    status = "skipped";
+                    reason = "Character is no longer bound to this instance.";
+                }
+                else if (sToCloud9Sidecar->ClusterModeEnabled() && !sToCloud9Sidecar->IsMapAssigned(mapId))
+                {
+                    status = "skipped";
+                    reason = "This worldserver does not own the instance map.";
+                }
+                else if (player && player->IsInCombat())
+                {
+                    status = "skipped";
+                    reason = "Character is in combat.";
+                }
+                else if (player && player->GetMapId() == mapId && player->GetInstanceId() != 0)
+                {
+                    status = "skipped";
+                    reason = "Character is currently inside this instance.";
+                }
+                else
+                {
+                    sInstanceSaveMgr->PlayerUnbindInstance(playerGuid, mapId, difficulty, true, player);
+                    if (sInstanceSaveMgr->PlayerGetBoundInstance(playerGuid, mapId, difficulty))
+                    {
+                        status = "failed";
+                        reason = "The server could not remove this instance bind.";
+                    }
+                }
+
+                if (!first)
+                    body += ',';
+                first = false;
+                body += Acore::StringFormat(R"({{"guid":{},"status":"{}","reason":"{}"}})",
+                    guid, status, EscapeJson(reason));
+            }
+            body += "]}";
+            ApiResponse response{200, "OK", std::move(body)};
+            boost::asio::post(_strand, [this, completionState, response = std::move(response)]() mutable
+            {
+                CompleteRequest(std::move(*completionState), std::move(response));
+            });
+        });
+        if (!queued)
+        {
+            CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable", "COMMAND_QUEUE_FULL"));
+            return true;
+        }
         return true;
     }
 

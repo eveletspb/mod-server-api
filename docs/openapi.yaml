@@ -224,6 +224,59 @@ paths:
                       horde: {type: integer, minimum: 0}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/CharacterUnavailable'}
+  /api/v1/instance-binds:
+    get:
+      tags: [Characters]
+      summary: List current-realm character instance binds
+      description: Includes online and offline characters. Binds are read from the character database; online and in-instance flags use the live snapshot.
+      responses:
+        '200':
+          description: Instance bind snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/InstanceBind'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/CharacterUnavailable'}
+  /api/v1/instance-binds/reset:
+    post:
+      tags: [Characters]
+      summary: Remove selected character binds for one map and difficulty
+      description: Queues the operation on the world thread. Characters in combat, currently inside the map, or no longer bound are returned as skipped. In cluster mode, a worldserver that does not own the map also skips the operation. Does not alter the global reset schedule.
+      parameters:
+        - name: mapId
+          in: query
+          required: true
+          schema: {type: integer, format: int32, minimum: 1}
+        - name: difficulty
+          in: query
+          required: true
+          schema: {type: integer, format: int32, minimum: 0, maximum: 3}
+        - name: guids
+          in: query
+          required: true
+          description: Comma-separated list of 1 to 100 unique character GUIDs.
+          schema: {type: string, pattern: '^[1-9][0-9]*(,[1-9][0-9]*){0,99}$'}
+      responses:
+        '200':
+          description: Per-character outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: '#/components/schemas/InstanceBindResetResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/QueueFull'}
   /api/v1/groups:
     get:
       tags: [Groups]
@@ -459,7 +512,7 @@ components:
       name: includeTalents
       in: query
       required: false
-      description: Include active talent spell IDs for local specialization resolution.
+      description: Include active talent spell IDs and specialization summary resolved from server DBC data.
       schema: {type: boolean, default: false}
     CharacterGUIDs:
       name: guids
@@ -505,6 +558,31 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    InstanceBind:
+      type: object
+      required: [guid, name, class, level, online, mapId, mapName, isRaid, difficulty, permanent, extended, resetAt, completedEncounters, inInstance]
+      properties:
+        guid: {type: integer, format: int64, maximum: 4294967295}
+        name: {type: string}
+        class: {type: integer, minimum: 1, maximum: 11}
+        level: {type: integer, minimum: 1, maximum: 255}
+        online: {type: boolean}
+        mapId: {type: integer, format: int32}
+        mapName: {type: string}
+        isRaid: {type: boolean}
+        difficulty: {type: integer, minimum: 0, maximum: 3}
+        permanent: {type: boolean}
+        extended: {type: boolean}
+        resetAt: {type: integer, format: int64, minimum: 0, description: Unix timestamp in seconds}
+        completedEncounters: {type: integer, format: int32, minimum: 0}
+        inInstance: {type: boolean}
+    InstanceBindResetResult:
+      type: object
+      required: [guid, status]
+      properties:
+        guid: {type: integer, format: int64, maximum: 4294967295}
+        status: {type: string, enum: [reset, skipped, failed]}
+        reason: {type: string}
     Error:
       type: object
       required: [error]
@@ -600,6 +678,19 @@ components:
           type: array
           description: Present only when includeTalents=true; contains active talent spell IDs.
           items: {type: integer, format: int32}
+        spec:
+          type: string
+          description: Present with includeTalents=true or on character profiles; active talent tree name, or empty when no talent points are spent.
+        talentPoints:
+          type: array
+          description: Present with includeTalents=true or on character profiles; points spent in tree order 0, 1, 2.
+          minItems: 3
+          maxItems: 3
+          items: {type: integer, format: int32}
+        suggestedRoles:
+          type: array
+          description: Present with includeTalents=true or on character profiles; role suggestions derived from class and active talent tree.
+          items: {type: string, enum: [tank, healer, dps]}
         bot: {type: boolean}
         botType: {type: string, enum: [player, random, addclass, unknown]}
         deleted: {type: boolean}

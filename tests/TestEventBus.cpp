@@ -181,4 +181,190 @@ namespace
         EXPECT_EQ(received[1], "test.normal");
         EXPECT_EQ(bus.DroppedCount(), 1);
     }
+
+    TEST(ServerApiEventBus, RdeStreamSequenceExposesDroppedEvents)
+    {
+        ServerApi::EventBus bus(1);
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool firstStarted = false;
+        bool releaseFirst = false;
+        std::vector<uint64_t> receivedSequences;
+
+        bus.Subscribe("rde.run.log.*", [&mutex, &condition, &firstStarted, &releaseFirst,
+            &receivedSequences](ServerApi::ApiEvent const& event)
+        {
+            std::unique_lock lock(mutex);
+            receivedSequences.push_back(event.streamSequence);
+            condition.notify_all();
+            if (event.streamSequence == 1)
+            {
+                firstStarted = true;
+                condition.notify_all();
+                condition.wait(lock, [&releaseFirst]
+                {
+                    return releaseFirst;
+                });
+            }
+        });
+
+        bus.Start();
+        ASSERT_TRUE(bus.Publish({"rde.run.log.first", 0, {}, ServerApi::EventPriority::Telemetry}));
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(2), [&firstStarted]
+            {
+                return firstStarted;
+            }));
+        }
+
+        ASSERT_TRUE(bus.Publish({"rde.run.log.queued", 0, {}, ServerApi::EventPriority::Telemetry}));
+        EXPECT_FALSE(bus.Publish({"rde.run.log.dropped", 0, {}, ServerApi::EventPriority::Telemetry}));
+        {
+            std::lock_guard lock(mutex);
+            releaseFirst = true;
+        }
+        condition.notify_all();
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(2), [&receivedSequences]
+            {
+                return receivedSequences.size() == 2;
+            }));
+        }
+        ASSERT_TRUE(bus.Publish({"rde.run.log.after_drop", 0, {}, ServerApi::EventPriority::Telemetry}));
+        bus.Stop();
+
+        ASSERT_EQ(receivedSequences.size(), 3);
+        EXPECT_EQ(receivedSequences[0], 1);
+        EXPECT_EQ(receivedSequences[1], 2);
+        EXPECT_EQ(receivedSequences[2], 4);
+    }
+
+    TEST(ServerApiEventBus, ReplaysLatestEventsFromMatchingStreamEpoch)
+    {
+        ServerApi::EventBus bus(16);
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::vector<ServerApi::ApiEvent> received;
+        bus.Subscribe("rde.run.log.*", [&mutex, &condition, &received](ServerApi::ApiEvent const& event)
+        {
+            std::lock_guard lock(mutex);
+            received.push_back(event);
+            condition.notify_all();
+        });
+        bus.Start();
+        ASSERT_TRUE(bus.Publish({"rde.run.log.first"}));
+        ASSERT_TRUE(bus.Publish({"rde.run.log.second"}));
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(2), [&received]
+            {
+                return received.size() == 2;
+            }));
+        }
+
+        std::vector<ServerApi::ApiEvent> liveAfterReplay;
+        ServerApi::EventReplay replay = bus.SubscribeFrom({"rde.run.log.*"},
+            [&liveAfterReplay](ServerApi::ApiEvent const& event)
+            {
+                liveAfterReplay.push_back(event);
+            }, received.front().streamEpoch, received.front().streamSequence, 1, 1024);
+
+        ASSERT_TRUE(replay.cursorAccepted);
+        ASSERT_EQ(replay.events.size(), 1);
+        EXPECT_EQ(replay.events.front().streamSequence, received.back().streamSequence);
+        EXPECT_EQ(replay.events.front().type, "rde.run.log.second");
+        ASSERT_EQ(replay.subscriptions.size(), 1);
+
+        ASSERT_TRUE(bus.Publish({"rde.run.log.third"}));
+        bus.Stop();
+        ASSERT_EQ(liveAfterReplay.size(), 1);
+        EXPECT_EQ(liveAfterReplay.front().type, "rde.run.log.third");
+        bus.Unsubscribe(replay.subscriptions.front());
+    }
+
+    TEST(ServerApiEventBus, ReplaysBacklogLargerThanDefaultSseQueue)
+    {
+        constexpr uint64_t EventCount = 5000;
+        ServerApi::EventBus bus(EventCount + 1);
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::vector<ServerApi::ApiEvent> received;
+        bus.Subscribe("rde.run.log.*", [&mutex, &condition, &received](ServerApi::ApiEvent const& event)
+        {
+            std::lock_guard lock(mutex);
+            received.push_back(event);
+            condition.notify_all();
+        });
+        bus.Start();
+        for (uint64_t index = 0; index < EventCount; ++index)
+            ASSERT_TRUE(bus.Publish({"rde.run.log." + std::to_string(index)}));
+
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(5), [&received]
+            {
+                return received.size() == EventCount;
+            }));
+        }
+
+        ServerApi::EventReplay replay = bus.SubscribeFrom({"rde.run.log.*"}, [](ServerApi::ApiEvent const&) { },
+            received.front().streamEpoch, 0, 8192, 16 * 1024 * 1024);
+        bus.Stop();
+
+        ASSERT_TRUE(replay.cursorAccepted);
+        ASSERT_EQ(replay.events.size(), EventCount);
+        EXPECT_EQ(replay.events.front().streamSequence, 1);
+        EXPECT_EQ(replay.events.back().streamSequence, EventCount);
+    }
+
+    TEST(ServerApiEventBus, MarksCursorOlderThanRetainedHistoryIncomplete)
+    {
+        constexpr uint64_t EventCount = 8193;
+        ServerApi::EventBus bus(EventCount + 1);
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::vector<ServerApi::ApiEvent> received;
+        bus.Subscribe("rde.run.log.*", [&mutex, &condition, &received](ServerApi::ApiEvent const& event)
+        {
+            std::lock_guard lock(mutex);
+            received.push_back(event);
+            condition.notify_all();
+        });
+        bus.Start();
+        for (uint64_t index = 0; index < EventCount; ++index)
+            ASSERT_TRUE(bus.Publish({"rde.run.log." + std::to_string(index)}));
+
+        {
+            std::unique_lock lock(mutex);
+            ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(5), [&received]
+            {
+                return received.size() == EventCount;
+            }));
+        }
+
+        ServerApi::EventReplay replay = bus.SubscribeFrom({"rde.run.log.*"}, [](ServerApi::ApiEvent const&) { },
+            received.front().streamEpoch, 0, 8192, 16 * 1024 * 1024);
+        bus.Stop();
+
+        EXPECT_FALSE(replay.cursorAccepted);
+        ASSERT_EQ(replay.events.size(), 8192);
+        EXPECT_EQ(replay.events.front().streamSequence, 2);
+        EXPECT_EQ(replay.events.back().streamSequence, EventCount);
+    }
+
+    TEST(ServerApiEventBus, DoesNotReplayCursorFromAnotherServerEpoch)
+    {
+        ServerApi::EventBus bus(8);
+        bus.Start();
+        ASSERT_TRUE(bus.Publish({"rde.run.log.current"}));
+        ServerApi::EventReplay replay = bus.SubscribeFrom({"rde.run.log.*"}, [](ServerApi::ApiEvent const&) { },
+            "previous-server-process", 1, 8, 1024);
+        EXPECT_FALSE(replay.cursorAccepted);
+        EXPECT_TRUE(replay.events.empty());
+        ASSERT_EQ(replay.subscriptions.size(), 1);
+        bus.Unsubscribe(replay.subscriptions.front());
+        bus.Stop();
+    }
 }

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -83,6 +84,49 @@ namespace ServerApi
 
                 lineStart = lineEnd;
             }
+        }
+
+        std::string RequestHeader(std::string_view request, std::string_view expectedName)
+        {
+            std::string result;
+            ForEachRequestHeader(request, [&result, expectedName](std::string_view name, std::string_view value)
+            {
+                if (name.size() != expectedName.size() || !std::equal(name.begin(), name.end(), expectedName.begin(),
+                    [](unsigned char left, unsigned char right)
+                    {
+                        return std::tolower(left) == std::tolower(right);
+                    }))
+                    return;
+                result.assign(value);
+            });
+            return result;
+        }
+
+        struct SseCursor
+        {
+            std::string streamEpoch;
+            uint64_t sequence = 0;
+        };
+
+        std::optional<SseCursor> ParseSseCursor(std::string_view value)
+        {
+            std::size_t const separator = value.rfind(':');
+            if (separator == std::string_view::npos || separator == 0 || separator + 1 == value.size())
+                return std::nullopt;
+
+            std::string_view const epoch = value.substr(0, separator);
+            if (!std::all_of(epoch.begin(), epoch.end(), [](unsigned char character)
+                {
+                    return std::isalnum(character) || character == '-';
+                }))
+                return std::nullopt;
+
+            uint64_t sequence = 0;
+            std::string_view const sequenceText = value.substr(separator + 1);
+            auto const [end, error] = std::from_chars(sequenceText.data(), sequenceText.data() + sequenceText.size(), sequence);
+            if (error != std::errc{} || end != sequenceText.data() + sequenceText.size() || sequence == 0)
+                return std::nullopt;
+            return SseCursor{std::string(epoch), sequence};
         }
 
         AuthenticationRequest MakeAuthenticationRequest(std::string_view request,
@@ -365,7 +409,13 @@ namespace ServerApi
         {
             std::string body = "{\"type\":\"" + EscapeJson(event.type)
                 + "\",\"timestamp\":" + std::to_string(event.timestampMilliseconds)
-                + ",\"version\":1,\"data\":{";
+                + ",\"version\":1";
+            if (event.streamSequence != 0)
+            {
+                body += ",\"streamEpoch\":\"" + EscapeJson(event.streamEpoch) + "\"";
+                body += ",\"streamSequence\":" + std::to_string(event.streamSequence);
+            }
+            body += ",\"data\":{";
             bool first = true;
             for (auto const& [key, value] : event.data)
             {
@@ -439,13 +489,30 @@ namespace ServerApi
             return chunk.str();
         }
 
+        std::string SerializeSseFrame(ApiEvent const& event)
+        {
+            std::string frame;
+            if (event.streamSequence != 0 && !event.streamEpoch.empty())
+                frame = "id: " + event.streamEpoch + ":" + std::to_string(event.streamSequence) + "\n";
+            frame += "data: " + SerializeApiEvent(event) + "\n\n";
+            return frame;
+        }
+
         class SseSession : public std::enable_shared_from_this<SseSession>
         {
+            struct PendingEvent
+            {
+                uint64_t sequence = 0;
+                std::string chunk;
+            };
+
         public:
             SseSession(boost::asio::ip::tcp::socket socket, Config config,
-                std::shared_ptr<std::atomic_uint32_t> sseClients, std::vector<std::string> patterns)
+                std::shared_ptr<std::atomic_uint32_t> sseClients, std::vector<std::string> patterns,
+                SseCursor cursor)
                 : _socket(std::move(socket)), _config(std::move(config)), _sseClients(std::move(sseClients)),
-                  _patterns(std::move(patterns)), _heartbeat(_socket.get_executor()) { }
+                  _patterns(std::move(patterns)), _requestedCursor(std::move(cursor)),
+                  _heartbeat(_socket.get_executor()) { }
 
             ~SseSession()
             {
@@ -468,8 +535,8 @@ namespace ServerApi
                     }
                     self->_headersWritten = true;
                     self->ScheduleHeartbeat();
-                    if (!self->_writeQueue.empty())
-                        self->WriteNext();
+                    self->PumpReplayEvents();
+                    self->WriteNext();
                 });
             }
 
@@ -477,12 +544,109 @@ namespace ServerApi
             void Subscribe()
             {
                 std::weak_ptr<SseSession> weakSelf = shared_from_this();
-                for (std::string const& pattern : _patterns)
-                    _subscriptions.push_back(GetEventBus().Subscribe(pattern, [weakSelf](ApiEvent const& event)
+                EventReplay replay = GetEventBus().SubscribeFrom(_patterns, [weakSelf](ApiEvent const& event)
+                {
+                    if (auto self = weakSelf.lock())
+                        self->HandleEvent(event);
+                }, _requestedCursor.streamEpoch, _requestedCursor.sequence,
+                    std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max());
+                _subscriptions = std::move(replay.subscriptions);
+                std::deque<PendingEvent> replayEvents;
+                for (ApiEvent const& event : replay.events)
+                    replayEvents.push_back({event.streamSequence, MakeChunk(SerializeSseFrame(event))});
+                {
+                    std::lock_guard<std::mutex> lock(_replayMutex);
+                    if (replay.cursorAccepted)
+                        _lastQueuedSequence = _requestedCursor.sequence;
+                    _replayEvents.swap(replayEvents);
+                }
+            }
+
+            void HandleEvent(ApiEvent const& event)
+            {
+                PendingEvent pending{event.streamSequence, MakeChunk(SerializeSseFrame(event))};
+                std::size_t const pendingBytes = pending.chunk.size();
+                bool overflow = false;
+                bool buffered = false;
+                {
+                    std::lock_guard<std::mutex> lock(_replayMutex);
+                    if (_replayPending)
                     {
-                        if (auto self = weakSelf.lock())
-                            self->Enqueue("data: " + SerializeApiEvent(event) + "\n\n");
-                    }));
+                        buffered = true;
+                        overflow = _eventsReceivedDuringReplay.size() >= _config.maxSseQueue ||
+                            _replayBufferedBytes >= _config.maxSseQueueBytes ||
+                            pendingBytes > _config.maxSseQueueBytes - _replayBufferedBytes;
+                        if (!overflow)
+                        {
+                            _replayBufferedBytes += pendingBytes;
+                            _eventsReceivedDuringReplay.push_back(std::move(pending));
+                        }
+                    }
+                }
+                if (overflow)
+                {
+                    RequestClose("replay_buffer_overflow", "attemptedBytes=" + std::to_string(pendingBytes));
+                    return;
+                }
+                if (buffered)
+                    return;
+                EnqueueEvent(pending);
+            }
+
+            bool EnqueueEvent(PendingEvent& event, bool closeOnOverflow = true)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_replayMutex);
+                    if (event.sequence != 0 && event.sequence <= _lastQueuedSequence)
+                        return true;
+                }
+                if (!EnqueueChunk(event.chunk, closeOnOverflow))
+                    return false;
+                {
+                    std::lock_guard<std::mutex> lock(_replayMutex);
+                    if (event.sequence > _lastQueuedSequence)
+                        _lastQueuedSequence = event.sequence;
+                }
+                return true;
+            }
+
+            void PumpReplayEvents()
+            {
+                while (true)
+                {
+                    PendingEvent event;
+                    bool fromLiveBuffer = false;
+                    {
+                        std::lock_guard<std::mutex> lock(_replayMutex);
+                        if (!_replayEvents.empty())
+                        {
+                            event = std::move(_replayEvents.front());
+                            _replayEvents.pop_front();
+                        }
+                        else if (!_eventsReceivedDuringReplay.empty())
+                        {
+                            fromLiveBuffer = true;
+                            event = std::move(_eventsReceivedDuringReplay.front());
+                            _eventsReceivedDuringReplay.pop_front();
+                            _replayBufferedBytes -= event.chunk.size();
+                        }
+                        else
+                        {
+                            _replayPending = false;
+                            return;
+                        }
+                    }
+                    if (!EnqueueEvent(event, false))
+                    {
+                        std::lock_guard<std::mutex> lock(_replayMutex);
+                        if (fromLiveBuffer)
+                            _replayBufferedBytes += event.chunk.size();
+                        std::deque<PendingEvent>& queue = fromLiveBuffer ?
+                            _eventsReceivedDuringReplay : _replayEvents;
+                        queue.push_front(std::move(event));
+                        return;
+                    }
+                }
             }
 
             void ScheduleHeartbeat()
@@ -493,7 +657,8 @@ namespace ServerApi
                 {
                     if (error || self->_closed)
                         return;
-                    self->Enqueue(": keep-alive\n\n");
+                    std::string heartbeat = MakeChunk(": keep-alive\n\n");
+                    self->EnqueueChunk(heartbeat, false);
                     self->ScheduleHeartbeat();
                 });
             }
@@ -501,17 +666,27 @@ namespace ServerApi
             void Enqueue(std::string payload)
             {
                 std::string chunk = MakeChunk(std::move(payload));
+                EnqueueChunk(chunk, true);
+            }
+
+            bool EnqueueChunk(std::string& chunk, bool closeOnOverflow)
+            {
                 bool overflow = false;
+                bool capacityExceeded = false;
                 {
                     std::lock_guard<std::mutex> lock(_outboundMutex);
                     if (_closeRequested)
-                        return;
+                        return false;
                     if (_pendingMessages >= _config.maxSseQueue ||
                         _pendingBytes >= _config.maxSseQueueBytes ||
                         chunk.size() > _config.maxSseQueueBytes - _pendingBytes)
                     {
-                        _closeRequested = true;
-                        overflow = true;
+                        capacityExceeded = true;
+                        if (closeOnOverflow)
+                        {
+                            _closeRequested = true;
+                            overflow = true;
+                        }
                     }
                     else
                     {
@@ -528,8 +703,10 @@ namespace ServerApi
                         self->CloseOnExecutor("outbound_queue_overflow",
                             "attemptedBytes=" + std::to_string(attemptedBytes));
                     });
-                    return;
+                    return false;
                 }
+                if (capacityExceeded)
+                    return false;
 
                 boost::asio::post(_socket.get_executor(), [self, chunk = std::move(chunk)]() mutable
                 {
@@ -541,6 +718,22 @@ namespace ServerApi
                     self->_writeQueue.push_back(std::move(chunk));
                     if (self->_headersWritten && !self->_writeInProgress)
                         self->WriteNext();
+                });
+                return true;
+            }
+
+            void RequestClose(char const* reason, std::string detail)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_outboundMutex);
+                    if (_closeRequested)
+                        return;
+                    _closeRequested = true;
+                }
+                auto self = shared_from_this();
+                boost::asio::post(_socket.get_executor(), [self, reason, detail = std::move(detail)]
+                {
+                    self->CloseOnExecutor(reason, detail);
                 });
             }
 
@@ -564,8 +757,9 @@ namespace ServerApi
 
                 _writeInProgress = true;
                 auto self = shared_from_this();
-                boost::asio::async_write(_socket, boost::asio::buffer(batch),
-                    [self, batch = std::move(batch), batchMessages](
+                auto writeBuffer = std::make_shared<std::string>(std::move(batch));
+                boost::asio::async_write(_socket, boost::asio::buffer(*writeBuffer),
+                    [self, writeBuffer, batchMessages](
                         boost::system::error_code error, std::size_t bytesWritten)
                 {
                     self->_writeInProgress = false;
@@ -574,7 +768,7 @@ namespace ServerApi
                         self->CloseOnExecutor("event_write_error", error.message());
                         return;
                     }
-                    if (bytesWritten != batch.size())
+                    if (bytesWritten != writeBuffer->size())
                     {
                         self->CloseOnExecutor("event_write_error", "incomplete async_write");
                         return;
@@ -585,6 +779,7 @@ namespace ServerApi
                         self->_writeQueue.pop_front();
                         self->ReleaseMessage(bytes);
                     }
+                    self->PumpReplayEvents();
                     self->WriteNext();
                 });
             }
@@ -645,6 +840,7 @@ namespace ServerApi
             std::shared_ptr<std::atomic_uint32_t> _sseClients;
             std::vector<std::string> _patterns;
             std::vector<SubscriptionId> _subscriptions;
+            SseCursor _requestedCursor;
             boost::asio::steady_timer _heartbeat;
             std::string _responseHeaders =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
@@ -652,6 +848,12 @@ namespace ServerApi
                 "Transfer-Encoding: chunked\r\nX-Accel-Buffering: no\r\n\r\n";
             std::deque<std::string> _writeQueue;
             std::mutex _outboundMutex;
+            std::mutex _replayMutex;
+            std::deque<PendingEvent> _replayEvents;
+            std::deque<PendingEvent> _eventsReceivedDuringReplay;
+            uint64_t _lastQueuedSequence = 0;
+            std::size_t _replayBufferedBytes = 0;
+            bool _replayPending = true;
             std::size_t _pendingMessages = 0;
             std::size_t _pendingBytes = 0;
             bool _closeRequested = false;
@@ -1171,8 +1373,10 @@ namespace ServerApi
                     return;
                 }
 
+                auto cursor = ParseSseCursor(RequestHeader(_request, "Last-Event-ID"));
                 auto session = std::make_shared<SseSession>(
-                    std::move(_socket), _config, _sseClients, std::move(patterns));
+                    std::move(_socket), _config, _sseClients, std::move(patterns),
+                    cursor.value_or(SseCursor{}));
                 session->Start();
             }
             else if (path == "/api/v1/server" || path == "/api/v1/server/metrics")
@@ -1190,6 +1394,49 @@ namespace ServerApi
                 if (!RequireMethod(method, "GET"))
                     return;
                 WriteResponse(200, "OK", BuildModulesResponse());
+            }
+            else if (path == "/api/v1/instance-binds" || path == "/api/v1/instance-binds/reset")
+            {
+                bool const reset = path == "/api/v1/instance-binds/reset";
+                if (!RequireMethod(method, reset ? "POST" : "GET"))
+                    return;
+
+                auto self = shared_from_this();
+                std::shared_ptr<CharactersApi> charactersApi = _charactersApi;
+                auto completion = [self](ApiResponse response)
+                {
+                    boost::asio::post(self->_socket.get_executor(),
+                        [self, response = std::move(response)]() mutable
+                    {
+                        self->WriteResponse(response.status, response.reason, response.body);
+                    });
+                };
+                auto queueFull = [self]
+                {
+                    boost::asio::post(self->_socket.get_executor(), [self]
+                    {
+                        self->WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"CHARACTER_QUEUE_FULL"}})");
+                    });
+                };
+                std::string requestTarget = target;
+                boost::asio::post(_charactersApiStrand, [charactersApi, reset,
+                    requestTarget = std::move(requestTarget), completion = std::move(completion),
+                    queueFull = std::move(queueFull)]() mutable
+                {
+                    if (!charactersApi)
+                    {
+                        queueFull();
+                        return;
+                    }
+
+                    bool const accepted = reset
+                        ? charactersApi->ResetInstanceBinds(std::move(requestTarget), std::move(completion))
+                        : charactersApi->InstanceBinds(std::move(completion));
+                    if (!accepted)
+                        queueFull();
+                });
+                return;
             }
             else if (path == "/api/v1/characters" || path.rfind("/api/v1/characters/", 0) == 0)
             {
