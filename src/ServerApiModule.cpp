@@ -147,7 +147,7 @@ namespace
                 return;
 
             ServerApi::GetModuleRegistry().Register({
-                "server-api", ServerApiVersion, {"server", "runtime", "characters", "commands", "events"}});
+                "server-api", ServerApiVersion, {"server", "runtime", "characters", "accounts", "commands", "events"}});
 
             ServerApi::GetEventBus().SetMaxQueueSize(_config.maxWebSocketPublishQueue);
             ServerApi::GetEventBus().Start();

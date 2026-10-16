@@ -3,6 +3,7 @@
  */
 
 #include "ServerApi/ApiServer.h"
+#include "ServerApi/AccountsApi.h"
 #include "ServerApi/Authentication.h"
 #include "ServerApi/CharactersApi.h"
 #include "ServerApi/CommandQueue.h"
@@ -1273,7 +1274,21 @@ namespace ServerApi
                     return;
                 }
 
-                if (self->_request.find("\r\n\r\n") == std::string::npos)
+                std::size_t const headerEnd = self->_request.find("\r\n\r\n");
+                if (headerEnd == std::string::npos)
+                {
+                    self->ReadRequest();
+                    return;
+                }
+
+                std::string const contentLengthText = RequestHeader(self->_request, "Content-Length");
+                std::size_t contentLength = 0;
+                if (!contentLengthText.empty() && !ParseUnsigned(contentLengthText, contentLength))
+                {
+                    self->HandleRequest();
+                    return;
+                }
+                if (self->_request.size() < headerEnd + 4 + contentLength)
                 {
                     self->ReadRequest();
                     return;
@@ -1300,6 +1315,12 @@ namespace ServerApi
             if ((method != "GET" && method != "POST") || version != "HTTP/1.1")
             {
                 WriteResponse(400, "Bad Request", R"({"error":{"code":"BAD_REQUEST"}})");
+                return;
+            }
+
+            if (!RequestHeader(_request, "Transfer-Encoding").empty())
+            {
+                WriteResponse(400, "Bad Request", R"({"error":{"code":"UNSUPPORTED_TRANSFER_ENCODING"}})");
                 return;
             }
 
@@ -1394,6 +1415,66 @@ namespace ServerApi
                 if (!RequireMethod(method, "GET"))
                     return;
                 WriteResponse(200, "OK", BuildModulesResponse());
+            }
+            else if (path == "/api/v1/accounts/capabilities")
+            {
+                if (!RequireMethod(method, "GET"))
+                    return;
+                WriteResponse(200, "OK", R"({"available":true,"create":true,"security":true})");
+            }
+            else if (path == "/api/v1/accounts")
+            {
+                if (!RequireMethod(method, "POST"))
+                    return;
+                std::string const contentType = RequestHeader(_request, "Content-Type");
+                if (!contentType.starts_with("application/json"))
+                {
+                    WriteResponse(415, "Unsupported Media Type", R"({"error":{"code":"JSON_REQUIRED"}})");
+                    return;
+                }
+
+                auto self = shared_from_this();
+                auto completion = [self](ApiResponse response)
+                {
+                    boost::asio::post(self->_socket.get_executor(),
+                        [self, response = std::move(response)]() mutable
+                    {
+                        self->WriteResponse(response.status, response.reason, response.body);
+                    });
+                };
+                if (!AccountsApi::Create(RequestBody(), std::move(completion)))
+                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
+                return;
+            }
+            else if (method == "POST" && path.rfind("/api/v1/accounts/", 0) == 0 && path.ends_with("/security"))
+            {
+                std::string const idText = path.substr(std::string("/api/v1/accounts/").size(),
+                    path.size() - std::string("/api/v1/accounts/").size() - std::string("/security").size());
+                uint32_t accountId = 0;
+                std::string const contentType = RequestHeader(_request, "Content-Type");
+                if (!ParseUnsigned(idText, accountId) || accountId == 0)
+                {
+                    WriteResponse(400, "Bad Request", R"({"error":{"code":"INVALID_ACCOUNT_ID"}})");
+                    return;
+                }
+                if (!contentType.starts_with("application/json"))
+                {
+                    WriteResponse(415, "Unsupported Media Type", R"({"error":{"code":"JSON_REQUIRED"}})");
+                    return;
+                }
+
+                auto self = shared_from_this();
+                auto completion = [self](ApiResponse response)
+                {
+                    boost::asio::post(self->_socket.get_executor(),
+                        [self, response = std::move(response)]() mutable
+                    {
+                        self->WriteResponse(response.status, response.reason, response.body);
+                    });
+                };
+                if (!AccountsApi::SetSecurity(accountId, RequestBody(), std::move(completion)))
+                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
+                return;
             }
             else if (path == "/api/v1/instance-binds" || path == "/api/v1/instance-binds/reset")
             {
@@ -1677,6 +1758,17 @@ namespace ServerApi
             WriteResponse(405, "Method Not Allowed", R"({"error":{"code":"METHOD_NOT_ALLOWED"}})",
                 Acore::StringFormat("Allow: {}\r\n", expected));
             return false;
+        }
+
+        std::string RequestBody() const
+        {
+            std::size_t const bodyStart = _request.find("\r\n\r\n") + 4;
+            std::string const contentLengthText = RequestHeader(_request, "Content-Length");
+            std::size_t contentLength = 0;
+            if (contentLengthText.empty() || !ParseUnsigned(contentLengthText, contentLength) ||
+                bodyStart > _request.size() || contentLength > _request.size() - bodyStart)
+                return {};
+            return _request.substr(bodyStart, contentLength);
         }
 
         bool EnqueueCommand(std::function<void()> command)

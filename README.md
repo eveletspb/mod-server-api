@@ -11,8 +11,8 @@ registered module capabilities.
 ![mod-server-api banner](banner.png)
 
 Built-in endpoints cover health and readiness, server state and metrics,
-online players, the database-backed character catalog, groups, and active
-dungeon/raid instances. The module also provides a world-thread runtime
+account creation/access, online players, the database-backed character catalog,
+groups, and active dungeon/raid instances. The module also provides a world-thread runtime
 snapshot, a bounded in-process EventBus, and `/ws/v1/events` with subscriptions
 and ping/pong. Authentication is selected through a provider registry and
 defaults to `NoAuthProvider` on localhost; see [docs/auth.md](docs/auth.md).
@@ -86,6 +86,21 @@ curl \
 curl \
   http://127.0.0.1:7878/api/v1/server/metrics
 ```
+
+### Accounts
+
+| Method | Endpoint | Auth |
+|---|---|---|
+| `GET` | `/api/v1/accounts/capabilities` | configured provider |
+| `POST` | `/api/v1/accounts` | configured provider |
+| `POST` | `/api/v1/accounts/{accountId}/security` | configured provider |
+
+Account mutations are queued through the worldserver and use the core account
+manager. Create requests send the password only in the JSON body. Security
+levels are `0` Player, `1` Moderator, `2` Game Master and `3` Administrator;
+`realmId=-1` applies to all realms. The mutation result distinguishes completed,
+partial and rejected operations, and remains pending if the Auth database has
+not confirmed the write within the server's wait window.
 
 ### Players
 

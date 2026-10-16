@@ -16,6 +16,7 @@ servers:
 tags:
   - name: Health
   - name: Server
+  - name: Accounts
   - name: Players
   - name: Characters
   - name: Groups
@@ -65,6 +66,73 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ServerMetrics'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/accounts/capabilities:
+    get:
+      tags: [Accounts]
+      summary: Check account mutation support
+      responses:
+        '200':
+          description: Account creation and security-level updates are available
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountMutationAvailability'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/accounts:
+    post:
+      tags: [Accounts]
+      summary: Create an account and optionally assign its security level
+      description: Queues account creation and access assignment through the worldserver. Password is accepted only in the JSON body. securityLevel supports 0 Player, 1 Moderator, 2 Game Master and 3 Administrator. realmId is -1 for all realms or a positive configured realm ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AccountCreateRequest'}
+      responses:
+        '201':
+          description: Account and requested access were confirmed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountOperationResult'}
+        '202':
+          description: Account operation is still pending confirmation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountOperationResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/BadRequest'}
+        '503': {$ref: '#/components/responses/QueueFull'}
+  /api/v1/accounts/{accountId}/security:
+    post:
+      tags: [Accounts]
+      summary: Assign an account security level
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: {type: integer, format: int64, minimum: 1, maximum: 4294967295}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AccountSecurityRequest'}
+      responses:
+        '200':
+          description: Requested access was confirmed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountOperationResult'}
+        '202':
+          description: Access update is still pending confirmation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountOperationResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/BadRequest'}
+        '503': {$ref: '#/components/responses/QueueFull'}
   /api/v1/modules:
     get:
       tags: [Server]
@@ -542,6 +610,11 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: Account already exists
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AccountOperationResult'}
     NotSupported:
       description: Optional integration is unavailable
       content:
@@ -558,6 +631,44 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    AccountMutationAvailability:
+      type: object
+      required: [available, create, security]
+      properties:
+        available: {type: boolean}
+        create: {type: boolean}
+        security: {type: boolean}
+    AccountCreateRequest:
+      type: object
+      required: [username, password, email, securityLevel, realmId]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 17, pattern: '^[A-Za-z0-9]+$'}
+        password: {type: string, minLength: 1, maxLength: 16, pattern: '^\S+$', writeOnly: true}
+        email: {type: string, maxLength: 255}
+        securityLevel: {type: integer, minimum: 0, maximum: 3}
+        realmId: {type: integer, format: int32, description: '-1 for all realms or a configured realm ID'}
+    AccountSecurityRequest:
+      type: object
+      required: [securityLevel, realmId]
+      properties:
+        securityLevel: {type: integer, minimum: 0, maximum: 3}
+        realmId: {type: integer, format: int32, description: '-1 for all realms or a configured realm ID'}
+    AccountOperationResult:
+      type: object
+      required: [status, message, accountId, steps]
+      properties:
+        status: {type: string, enum: [completed, partial, rejected]}
+        message: {type: string}
+        accountId: {type: integer, format: int64, maximum: 4294967295}
+        steps:
+          type: array
+          items:
+            type: object
+            required: [id, status, message]
+            properties:
+              id: {type: string}
+              status: {type: string, enum: [completed, failed, pending]}
+              message: {type: string}
     InstanceBind:
       type: object
       required: [guid, name, class, level, online, mapId, mapName, isRaid, difficulty, permanent, extended, resetAt, completedEncounters, inInstance]
