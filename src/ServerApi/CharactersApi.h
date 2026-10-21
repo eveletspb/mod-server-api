@@ -71,6 +71,7 @@ namespace ServerApi
         void FetchNextListBatch(std::shared_ptr<ListState> state);
         void BeginProfileQueries(std::shared_ptr<ProfileState> state);
         void QueryEquipment(std::shared_ptr<ProfileState> state);
+        void QueryStats(std::shared_ptr<ProfileState> state);
         void QueryProfessions(std::shared_ptr<ProfileState> state);
         std::shared_ptr<BotTypeSnapshot const> GetBotTypes() const;
         void StartBotTypeWorker();

@@ -213,13 +213,40 @@ group. With `includeTalents=true`, entries also contain `talentSpells`, the
 active specialization's learned spell IDs, plus `spec`, `talentPoints` (points
 spent in each talent tree) and `suggestedRoles`, calculated from server DBC
 data. A profile always includes these talent fields and adds `xp`, `money`, `talents` (`activeGroup` and
-`totalGroups`), `equipment` entries (`slot` and `itemEntry`) and `professions`
-(`skillId`, `name`, `value` and `max`).
+`totalGroups`), nullable `stats` with primary attributes, health and power resources,
+armor, resistances, attack/spell power, resilience and combat percentages, `equipment`
+entries with backward-compatible `slot` and `itemEntry`, unique item-instance
+`instanceGuid`, `equipmentMetadataVersion: 2`, item-template metadata, instance
+random-property ID/name plus localized enchantment names and numeric effect triples,
+and `professions` (`skillId`, `name`,
+`value` and `max`). Item metadata includes display/name/quality/level, armor,
+damage, all template stats and resistances, ranged modifier, sockets, socket bonus,
+GemProperties, and item spells. Item spells include trigger, charges, PPM,
+cooldowns, localized names, numeric spell effects (effect/aura type, base points,
+dice, per-level points, trigger spell and misc values), and effective proc rules
+from the server's loaded `spell_proc` data (masks, chance or PPM, cooldown and
+charges). Enchantments include
+slot, ID, duration, charges, localized names, associated gem ID and DBC effect
+triples (`type`, `amount`, `spellId`), plus effective custom chance/PPM, procEx and
+attributes from `spell_enchant_proc_data`; AzerothCore enchantments have IDs but no
+separate GUIDs. Socket bonuses include their DBC effects and proc metadata. Item-set
+IDs/names, equipped piece count, and each threshold spell with its active flag,
+numeric spell effects and effective proc rules are also returned. Unknown item
+templates remain in the response
+with `unknownTemplate: true`; if the World DB is unavailable, the profile returns
+`503 WORLD_DATABASE_UNAVAILABLE`. Online stats come from the runtime player snapshot.
+Offline stats come from `character_stats` when a saved row exists; `current` health
+and power are `null` for saved data, and `stats` is `null` when no saved row exists.
+The core populates `character_stats` only when external stat saving is enabled and
+the configured minimum level is reached.
 
 The item-level endpoint accepts either up to 100 `guids` or up to 40 exact
 `names`. It returns the rounded average `ItemLevel` for equipped inventory slots,
 excluding shirt and tabard. It reads inventory from Character DB and item
-templates from World DB inside the module.
+templates from World DB inside the module. Character profiles also enrich each
+equipped item with display ID, name, quality, item level, slot type, armor,
+stats, damage, resistances and durability. Missing item templates retain the
+slot and entry ID and are marked with `unknownTemplate`; no item data is inferred.
 
 The statistics endpoint returns average latency (`null` when no characters are
 online) and online Alliance/Horde character counts.
@@ -227,9 +254,10 @@ online) and online Alliance/Horde character counts.
 ### Instance binds
 
 `GET /api/v1/instance-binds` returns the current realm's personal dungeon and
-raid binds for online and offline characters. It reads `character_instance`,
-`instance` and character identity/status fields; `inInstance` is derived from
-the live character snapshot. Each row includes `guid`, `name`, `class`, `level`,
+raid binds for online and offline characters. When no binds exist, it returns
+`200 {"data":[]}`. It reads `character_instance`, `instance` and character
+identity/status fields; `inInstance` is derived from the live character
+snapshot. Each row includes `guid`, `name`, `class`, `level`,
 `online`, `mapId`, `mapName`, `isRaid`, `difficulty`, `permanent`, `extended`,
 `resetAt` (Unix seconds), `completedEncounters` and `inInstance`.
 
@@ -238,18 +266,22 @@ comma-separated `guids` query parameter (1–100 unique nonzero GUIDs). The
 operation is queued on the world thread and unbinds only the requested
 map/difficulty through `InstanceSaveMgr::PlayerUnbindInstance`; it does not
 change the global instance reset schedule or other character binds. The API
-returns one result per GUID with `status` (`reset`, `skipped` or `failed`) and a reason
-when skipped. A character currently in combat, inside that map, or no longer
-bound is skipped. In cluster mode, a worldserver that does not own the map also
-returns a skipped result. Database/request queue errors are returned as API errors, not
-as successful per-character results. In cluster mode, GET reports database
-binds while reset only runs on a worldserver assigned the requested map.
+returns one result per GUID with `status` (`reset`, `pending`, `skipped` or
+`failed`). For an online character inside the requested instance, the API
+starts a teleport to the character's homebind even if the character is in combat;
+the core's normal teleport path ends combat. It returns `pending`; the caller
+must confirm the character left the instance before retrying the reset. A failed
+teleport or a character no longer bound is skipped and leaves the bind intact. In
+cluster mode, a worldserver that does not own the map returns a skipped result. Database/request queue errors are
+returned as API errors, not as successful per-character results. In cluster
+mode, GET reports database binds while reset only runs on a worldserver assigned
+the requested map.
 
 ```json
 {
   "results": [
     {"guid": 123, "status": "reset"},
-    {"guid": 456, "status": "skipped", "reason": "Character is in combat."}
+    {"guid": 456, "status": "skipped", "reason": "Character is no longer bound to this instance."}
   ]
 }
 ```

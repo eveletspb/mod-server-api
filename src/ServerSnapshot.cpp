@@ -5,6 +5,7 @@
 #include "ServerApi/ServerSnapshot.h"
 
 #include "GameTime.h"
+#include "Entities/Object/Updates/UpdateFields.h"
 #include "Group.h"
 #include "MapMgr.h"
 #include "Player.h"
@@ -114,6 +115,30 @@ namespace ServerApi
             Powers const powerType = player->getPowerType();
             playerSnapshot.power = player->GetPower(powerType);
             playerSnapshot.maxPower = player->GetMaxPower(powerType);
+            for (uint8_t index = 0; index < playerSnapshot.stats.primaryAttributes.size(); ++index)
+                playerSnapshot.stats.primaryAttributes[index] = static_cast<uint32_t>(player->GetStat(Stats(index)));
+            playerSnapshot.stats.health = player->GetHealth();
+            playerSnapshot.stats.maxHealth = player->GetMaxHealth();
+            for (uint8_t index = 0; index < playerSnapshot.stats.powers.size(); ++index)
+            {
+                Powers const power = Powers(index);
+                playerSnapshot.stats.powers[index] = player->GetPower(power);
+                playerSnapshot.stats.maxPowers[index] = player->GetMaxPower(power);
+            }
+            playerSnapshot.stats.armor = player->GetArmor();
+            for (uint8_t index = 0; index < playerSnapshot.stats.resistances.size(); ++index)
+                playerSnapshot.stats.resistances[index] = player->GetResistance(SpellSchools(index + 1));
+            playerSnapshot.stats.blockPct = player->GetFloatValue(PLAYER_BLOCK_PERCENTAGE);
+            playerSnapshot.stats.dodgePct = player->GetFloatValue(PLAYER_DODGE_PERCENTAGE);
+            playerSnapshot.stats.parryPct = player->GetFloatValue(PLAYER_PARRY_PERCENTAGE);
+            playerSnapshot.stats.critPct = player->GetFloatValue(PLAYER_CRIT_PERCENTAGE);
+            playerSnapshot.stats.rangedCritPct = player->GetFloatValue(PLAYER_RANGED_CRIT_PERCENTAGE);
+            playerSnapshot.stats.spellCritPct = player->GetFloatValue(PLAYER_SPELL_CRIT_PERCENTAGE1);
+            playerSnapshot.stats.attackPower = player->GetUInt32Value(UNIT_FIELD_ATTACK_POWER);
+            playerSnapshot.stats.rangedAttackPower = player->GetUInt32Value(UNIT_FIELD_RANGED_ATTACK_POWER);
+            playerSnapshot.stats.spellPower = player->GetBaseSpellPowerBonus();
+            playerSnapshot.stats.resilience = player->GetUInt32Value(PLAYER_FIELD_COMBAT_RATING_1 +
+                static_cast<uint16>(CR_CRIT_TAKEN_SPELL));
             if (WorldSession* session = player->GetSession())
             {
                 playerSnapshot.accountId = session->GetAccountId();

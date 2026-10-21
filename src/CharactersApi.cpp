@@ -8,6 +8,7 @@
 #include "ServerApi/HttpUtils.h"
 #include "ServerApi/ServerSnapshot.h"
 
+#include "Common.h"
 #include "DatabaseEnv.h"
 #include "DataStores/DBCStores.h"
 #include "Field.h"
@@ -17,6 +18,8 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "Spells/SpellInfo.h"
+#include "Spells/SpellMgr.h"
 #include "TC9Sidecar/TC9Sidecar.h"
 
 #ifdef MOD_PLAYERBOTS
@@ -32,8 +35,10 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -104,10 +109,285 @@ namespace ServerApi
             std::vector<std::string_view> suggestedRoles;
         };
 
+        struct EquipmentStat
+        {
+            uint8_t type = 0;
+            int32_t value = 0;
+        };
+
+        struct EquipmentDamage
+        {
+            float min = 0.0f;
+            float max = 0.0f;
+            uint8_t type = 0;
+        };
+
+        struct EquipmentEnchantmentProc
+        {
+            uint32_t customChance = 0;
+            float ppmChance = 0.0f;
+            uint32_t procEx = 0;
+            uint32_t attributeMask = 0;
+        };
+
+        EquipmentEnchantmentProc BuildEnchantmentProc(SpellEnchantProcEntry const& source)
+        {
+            return {source.customChance, source.PPMChance, source.procEx, source.attributeMask};
+        }
+
+        void AppendEnchantmentProcJson(std::string& body, bool hasProc, EquipmentEnchantmentProc const& proc)
+        {
+            if (!hasProc)
+            {
+                body += "null";
+                return;
+            }
+
+            body += "{\"customChance\":" + std::to_string(proc.customChance) +
+                ",\"ppmChance\":" + std::to_string(proc.ppmChance) +
+                ",\"procEx\":" + std::to_string(proc.procEx) +
+                ",\"attributeMask\":" + std::to_string(proc.attributeMask) + "}";
+        }
+
+        struct EquipmentEnchantment
+        {
+            uint8_t slot = 0;
+            uint32_t id = 0;
+            uint32_t durationMs = 0;
+            uint32_t charges = 0;
+            std::string name;
+            std::string nameRu;
+            uint32_t gemId = 0;
+            struct Effect
+            {
+                uint32_t type = 0;
+                uint32_t amount = 0;
+                uint32_t spellId = 0;
+            };
+            std::vector<Effect> effects;
+            bool hasProc = false;
+            EquipmentEnchantmentProc proc;
+        };
+
+        struct EquipmentSocket
+        {
+            uint32_t color = 0;
+            uint32_t content = 0;
+        };
+
+        struct EquipmentSpellEffect
+        {
+            uint8_t index = 0;
+            uint32_t type = 0;
+            uint32_t auraType = 0;
+            int32_t basePoints = 0;
+            int32_t dieSides = 0;
+            float realPointsPerLevel = 0.0f;
+            uint32_t triggerSpell = 0;
+            int32_t miscValue = 0;
+            int32_t miscValueB = 0;
+            uint32_t amplitudeMs = 0;
+        };
+
+        struct EquipmentSpellProc
+        {
+            uint32_t schoolMask = 0;
+            uint32_t spellFamilyName = 0;
+            std::array<uint32_t, 3> spellFamilyMask{};
+            uint32_t procFlags = 0;
+            uint32_t spellTypeMask = 0;
+            uint32_t spellPhaseMask = 0;
+            uint32_t hitMask = 0;
+            uint32_t attributesMask = 0;
+            uint32_t disableEffectsMask = 0;
+            float procsPerMinute = 0.0f;
+            float chance = 0.0f;
+            int64_t cooldownMs = 0;
+            uint32_t charges = 0;
+        };
+
+        std::array<uint32_t, 3> ReadFlag96(flag96 const& source)
+        {
+            std::array<uint32_t, 3> parts{};
+            for (uint32_t bit = 0; bit < 32; ++bit)
+            {
+                uint32_t const bitMask = uint32_t{1} << bit;
+                if (source.HasFlag(bitMask, 0, 0))
+                    parts[0] |= bitMask;
+                if (source.HasFlag(0, bitMask, 0))
+                    parts[1] |= bitMask;
+                if (source.HasFlag(0, 0, bitMask))
+                    parts[2] |= bitMask;
+            }
+            return parts;
+        }
+
+        EquipmentSpellProc BuildSpellProc(SpellProcEntry const& source)
+        {
+            return {
+                source.SchoolMask,
+                source.SpellFamilyName,
+                ReadFlag96(source.SpellFamilyMask),
+                source.ProcFlags,
+                source.SpellTypeMask,
+                source.SpellPhaseMask,
+                source.HitMask,
+                source.AttributesMask,
+                source.DisableEffectsMask,
+                source.ProcsPerMinute,
+                source.Chance,
+                source.Cooldown.count(),
+                source.Charges
+            };
+        }
+
+        void AppendSpellProcJson(std::string& body, bool hasProc, EquipmentSpellProc const& proc)
+        {
+            if (!hasProc)
+            {
+                body += "null";
+                return;
+            }
+
+            body += "{\"schoolMask\":" + std::to_string(proc.schoolMask) +
+                ",\"spellFamilyName\":" + std::to_string(proc.spellFamilyName) +
+                ",\"spellFamilyMask\":[" + std::to_string(proc.spellFamilyMask[0]) +
+                "," + std::to_string(proc.spellFamilyMask[1]) +
+                "," + std::to_string(proc.spellFamilyMask[2]) +
+                "],\"procFlags\":" + std::to_string(proc.procFlags) +
+                ",\"spellTypeMask\":" + std::to_string(proc.spellTypeMask) +
+                ",\"spellPhaseMask\":" + std::to_string(proc.spellPhaseMask) +
+                ",\"hitMask\":" + std::to_string(proc.hitMask) +
+                ",\"attributesMask\":" + std::to_string(proc.attributesMask) +
+                ",\"disableEffectsMask\":" + std::to_string(proc.disableEffectsMask) +
+                ",\"procsPerMinute\":" + std::to_string(proc.procsPerMinute) +
+                ",\"chance\":" + std::to_string(proc.chance) +
+                ",\"cooldownMs\":" + std::to_string(proc.cooldownMs) +
+                ",\"charges\":" + std::to_string(proc.charges) + "}";
+        }
+
+        struct EquipmentSpell
+        {
+            int32_t id = 0;
+            uint8_t trigger = 0;
+            int16_t charges = 0;
+            float ppmRate = 0.0f;
+            int32_t cooldownMs = 0;
+            uint16_t category = 0;
+            int32_t categoryCooldownMs = 0;
+            std::string name;
+            std::string nameRu;
+            std::vector<EquipmentSpellEffect> effects;
+            bool hasProc = false;
+            EquipmentSpellProc proc;
+        };
+
+        struct EquipmentSetBonus
+        {
+            uint8_t requiredItems = 0;
+            uint32_t spellId = 0;
+            std::string spellName;
+            std::string spellNameRu;
+            std::vector<EquipmentSpellEffect> effects;
+            bool hasProc = false;
+            EquipmentSpellProc proc;
+        };
+
+        struct RandomPropertyEnchantment
+        {
+            uint32_t id = 0;
+            uint32_t allocationPct = 0;
+            std::string name;
+            std::string nameRu;
+            std::vector<EquipmentEnchantment::Effect> effects;
+            bool hasProc = false;
+            EquipmentEnchantmentProc proc;
+        };
+
+        RandomPropertyEnchantment BuildRandomPropertyEnchantment(uint32_t id, uint32_t allocationPct)
+        {
+            RandomPropertyEnchantment property;
+            property.id = id;
+            property.allocationPct = allocationPct;
+            if (SpellItemEnchantmentEntry const* entry = sSpellItemEnchantmentStore.LookupEntry(id))
+            {
+                property.name = entry->description[LOCALE_enUS] ? entry->description[LOCALE_enUS] : "";
+                property.nameRu = entry->description[LOCALE_ruRU] ? entry->description[LOCALE_ruRU] : property.name;
+                for (std::size_t effectIndex = 0; effectIndex < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++effectIndex)
+                {
+                    uint32_t const type = entry->type[effectIndex];
+                    uint32_t const amount = entry->amount[effectIndex];
+                    uint32_t const spellId = entry->spellid[effectIndex];
+                    if (type != 0 || amount != 0 || spellId != 0)
+                        property.effects.push_back({type, amount, spellId});
+                }
+            }
+            if (SpellEnchantProcEntry const* proc = sSpellMgr->GetSpellEnchantProcEvent(id))
+            {
+                property.hasProc = true;
+                property.proc = BuildEnchantmentProc(*proc);
+            }
+            return property;
+        }
+
         struct EquippedItem
         {
             uint8_t slot = 0;
             uint32_t itemEntry = 0;
+            uint32_t instanceGuid = 0;
+            int32_t randomPropertyId = 0;
+            std::string randomPropertyName;
+            std::string randomPropertyNameRu;
+            std::vector<RandomPropertyEnchantment> randomPropertyEnchantments;
+            uint32_t displayId = 0;
+            std::string name;
+            std::string nameRu;
+            uint8_t quality = 0;
+            uint16_t itemLevel = 0;
+            uint8_t requiredLevel = 0;
+            uint8_t inventoryType = 0;
+            uint8_t itemClass = 0;
+            uint8_t itemSubclass = 0;
+            uint32_t flags = 0;
+            int32_t maxCount = 0;
+            uint8_t bonding = 0;
+            uint32_t armor = 0;
+            uint32_t block = 0;
+            uint32_t delayMs = 0;
+            uint32_t durability = 0;
+            uint32_t maxDurability = 0;
+            float rangedModRange = 0.0f;
+            uint32_t sellPrice = 0;
+            uint32_t allowableClass = 0;
+            uint32_t allowableRace = 0;
+            uint32_t requiredSkill = 0;
+            uint32_t requiredSkillRank = 0;
+            uint32_t requiredSpell = 0;
+            uint32_t requiredHonorRank = 0;
+            uint32_t requiredCityRank = 0;
+            uint32_t requiredReputationFaction = 0;
+            uint32_t requiredReputationRank = 0;
+            uint32_t itemSetId = 0;
+            std::string itemSetName;
+            std::string itemSetNameRu;
+            std::vector<EquipmentSetBonus> itemSetBonuses;
+            int16_t itemLimitCategory = 0;
+            std::string itemLimitCategoryName;
+            uint32_t socketBonus = 0;
+            std::string socketBonusName;
+            std::string socketBonusNameRu;
+            std::vector<EquipmentEnchantment::Effect> socketBonusEffects;
+            bool hasSocketBonusProc = false;
+            EquipmentEnchantmentProc socketBonusProc;
+            uint32_t gemProperties = 0;
+            std::array<EquipmentSocket, 3> sockets{};
+            std::vector<EquipmentSpell> spells;
+            std::vector<EquipmentEnchantment> enchantments;
+            std::vector<EquipmentStat> stats;
+            std::vector<EquipmentDamage> damage;
+            std::array<int32_t, 6> resistances{};
+            bool soulbound = false;
+            bool unknownTemplate = true;
         };
 
         struct ProfessionSkill
@@ -778,25 +1058,293 @@ namespace ServerApi
             }
         }
 
+        std::string BuildCharacterStatsJson(CharacterStatSnapshot const& stats, bool hasCurrentValues)
+        {
+            static constexpr std::array<std::string_view, 7> powerTypes = {
+                "mana", "rage", "focus", "energy", "happiness", "rune", "runicPower"
+            };
+            auto currentValue = [hasCurrentValues](uint32_t value)
+            {
+                return hasCurrentValues ? std::to_string(value) : std::string("null");
+            };
+            std::string body = "{\"source\":\"" +
+                std::string(hasCurrentValues ? "live" : "saved") + "\",\"primaryAttributes\":{" +
+                "\"strength\":" + std::to_string(stats.primaryAttributes[0]) +
+                ",\"agility\":" + std::to_string(stats.primaryAttributes[1]) +
+                ",\"stamina\":" + std::to_string(stats.primaryAttributes[2]) +
+                ",\"intellect\":" + std::to_string(stats.primaryAttributes[3]) +
+                ",\"spirit\":" + std::to_string(stats.primaryAttributes[4]) +
+                "},\"health\":{\"current\":" + currentValue(stats.health) +
+                ",\"maximum\":" + std::to_string(stats.maxHealth) + "},\"powers\":[";
+            for (std::size_t index = 0; index < powerTypes.size(); ++index)
+            {
+                if (index != 0)
+                    body += ',';
+                body += "{\"type\":\"" + std::string(powerTypes[index]) +
+                    "\",\"current\":" + currentValue(stats.powers[index]) +
+                    ",\"maximum\":" + std::to_string(stats.maxPowers[index]) + "}";
+            }
+            body += "],\"armor\":" + std::to_string(stats.armor) +
+                ",\"resistances\":{\"holy\":" + std::to_string(stats.resistances[0]) +
+                ",\"fire\":" + std::to_string(stats.resistances[1]) +
+                ",\"nature\":" + std::to_string(stats.resistances[2]) +
+                ",\"frost\":" + std::to_string(stats.resistances[3]) +
+                ",\"shadow\":" + std::to_string(stats.resistances[4]) +
+                ",\"arcane\":" + std::to_string(stats.resistances[5]) +
+                "},\"combat\":{\"attackPower\":" + std::to_string(stats.attackPower) +
+                ",\"rangedAttackPower\":" + std::to_string(stats.rangedAttackPower) +
+                ",\"spellPower\":" + std::to_string(stats.spellPower) +
+                ",\"resilience\":" + std::to_string(stats.resilience) +
+                ",\"blockPct\":" + std::to_string(stats.blockPct) +
+                ",\"dodgePct\":" + std::to_string(stats.dodgePct) +
+                ",\"parryPct\":" + std::to_string(stats.parryPct) +
+                ",\"critPct\":" + std::to_string(stats.critPct) +
+                ",\"rangedCritPct\":" + std::to_string(stats.rangedCritPct) +
+                ",\"spellCritPct\":" + std::to_string(stats.spellCritPct) + "}}";
+            return body;
+        }
+
         std::string BuildProfileJson(CharacterRecord const& character, bool online, bool bot,
             std::string_view botType, uint32_t mapId, uint32_t zoneId,
-            std::optional<PlayerSnapshot> const& runtime, std::vector<EquippedItem> const& equipment,
-            std::vector<ProfessionSkill> const& professions)
+            std::optional<PlayerSnapshot> const& runtime, std::optional<CharacterStatSnapshot> const& stats,
+            std::vector<EquippedItem> const& equipment, std::vector<ProfessionSkill> const& professions)
         {
             std::string body = BuildCharacterJson(character, online, bot, botType, mapId, zoneId, runtime);
             body.pop_back();
             body += ",\"xp\":" + std::to_string(character.xp) +
                 ",\"money\":" + std::to_string(character.money) +
                 ",\"talents\":{\"activeGroup\":" + std::to_string(character.activeTalentGroup) +
-                ",\"totalGroups\":" + std::to_string(character.talentGroupsCount) + "},\"equipment\":[";
+                ",\"totalGroups\":" + std::to_string(character.talentGroupsCount) +
+                "},\"equipmentMetadataVersion\":2,\"equipment\":[";
+            std::unordered_map<uint32_t, uint8_t> setCounts;
+            for (EquippedItem const& item : equipment)
+                if (item.itemSetId != 0)
+                    ++setCounts[item.itemSetId];
             for (std::size_t index = 0; index < equipment.size(); ++index)
             {
                 if (index != 0)
                     body += ',';
-                body += "{\"slot\":" + std::to_string(equipment[index].slot) +
-                    ",\"itemEntry\":" + std::to_string(equipment[index].itemEntry) + "}";
+                EquippedItem const& item = equipment[index];
+                body += "{\"slot\":" + std::to_string(item.slot) +
+                    ",\"itemEntry\":" + std::to_string(item.itemEntry) +
+                    ",\"instanceGuid\":" + std::to_string(item.instanceGuid) +
+                    ",\"randomPropertyId\":" + std::to_string(item.randomPropertyId) +
+                    ",\"randomPropertyName\":\"" + EscapeJson(item.randomPropertyName) + "\"" +
+                    ",\"randomPropertyNameRu\":\"" + EscapeJson(item.randomPropertyNameRu) + "\"" +
+                    ",\"displayId\":" + std::to_string(item.displayId) +
+                    ",\"name\":\"" + EscapeJson(item.name) + "\"" +
+                    ",\"nameRu\":\"" + EscapeJson(item.nameRu) + "\"" +
+                    ",\"quality\":" + std::to_string(item.quality) +
+                    ",\"itemLevel\":" + std::to_string(item.itemLevel) +
+                    ",\"requiredLevel\":" + std::to_string(item.requiredLevel) +
+                    ",\"inventoryType\":" + std::to_string(item.inventoryType) +
+                    ",\"itemClass\":" + std::to_string(item.itemClass) +
+                    ",\"itemSubclass\":" + std::to_string(item.itemSubclass) +
+                    ",\"flags\":" + std::to_string(item.flags) +
+                    ",\"maxCount\":" + std::to_string(item.maxCount) +
+                    ",\"bonding\":" + std::to_string(item.bonding) +
+                    ",\"armor\":" + std::to_string(item.armor) +
+                    ",\"block\":" + std::to_string(item.block) +
+                    ",\"delayMs\":" + std::to_string(item.delayMs) +
+                    ",\"durability\":" + std::to_string(item.durability) +
+                    ",\"maxDurability\":" + std::to_string(item.maxDurability) +
+                    ",\"rangedModRange\":" + std::to_string(item.rangedModRange) +
+                    ",\"sellPrice\":" + std::to_string(item.sellPrice) +
+                    ",\"allowableClass\":" + std::to_string(item.allowableClass) +
+                    ",\"allowableRace\":" + std::to_string(item.allowableRace) +
+                    ",\"requiredSkill\":" + std::to_string(item.requiredSkill) +
+                    ",\"requiredSkillRank\":" + std::to_string(item.requiredSkillRank) +
+                    ",\"requiredSpell\":" + std::to_string(item.requiredSpell) +
+                    ",\"requiredHonorRank\":" + std::to_string(item.requiredHonorRank) +
+                    ",\"requiredCityRank\":" + std::to_string(item.requiredCityRank) +
+                    ",\"requiredReputationFaction\":" + std::to_string(item.requiredReputationFaction) +
+                    ",\"requiredReputationRank\":" + std::to_string(item.requiredReputationRank) +
+                    ",\"itemSetId\":" + std::to_string(item.itemSetId) +
+                    ",\"itemSetName\":\"" + EscapeJson(item.itemSetName) + "\"" +
+                    ",\"itemSetNameRu\":\"" + EscapeJson(item.itemSetNameRu) + "\"" +
+                    ",\"itemSetEquippedCount\":" + std::to_string(item.itemSetId == 0 ? 0 : setCounts[item.itemSetId]) +
+                    ",\"itemSetBonuses\":[";
+                for (std::size_t bonusIndex = 0; bonusIndex < item.itemSetBonuses.size(); ++bonusIndex)
+                {
+                    if (bonusIndex != 0)
+                        body += ',';
+                    EquipmentSetBonus const& bonus = item.itemSetBonuses[bonusIndex];
+                    body += "{\"requiredItems\":" + std::to_string(bonus.requiredItems) +
+                        ",\"spellId\":" + std::to_string(bonus.spellId) +
+                        ",\"spellName\":\"" + EscapeJson(bonus.spellName) + "\"" +
+                        ",\"spellNameRu\":\"" + EscapeJson(bonus.spellNameRu) + "\"" +
+                        ",\"proc\":";
+                    AppendSpellProcJson(body, bonus.hasProc, bonus.proc);
+                    body += ",\"active\":";
+                    body += (setCounts[item.itemSetId] >= bonus.requiredItems ? "true" : "false");
+                    body += ",\"effects\":[";
+                    for (std::size_t effectIndex = 0; effectIndex < bonus.effects.size(); ++effectIndex)
+                    {
+                        if (effectIndex != 0)
+                            body += ',';
+                        EquipmentSpellEffect const& effect = bonus.effects[effectIndex];
+                        body += "{\"index\":" + std::to_string(effect.index) +
+                            ",\"type\":" + std::to_string(effect.type) +
+                            ",\"auraType\":" + std::to_string(effect.auraType) +
+                            ",\"basePoints\":" + std::to_string(effect.basePoints) +
+                            ",\"dieSides\":" + std::to_string(effect.dieSides) +
+                            ",\"realPointsPerLevel\":" + std::to_string(effect.realPointsPerLevel) +
+                            ",\"triggerSpell\":" + std::to_string(effect.triggerSpell) +
+                            ",\"miscValue\":" + std::to_string(effect.miscValue) +
+                            ",\"miscValueB\":" + std::to_string(effect.miscValueB) +
+                            ",\"amplitudeMs\":" + std::to_string(effect.amplitudeMs) + "}";
+                    }
+                    body += "]}";
+                }
+                body += "],\"itemLimitCategory\":" + std::to_string(item.itemLimitCategory) +
+                    ",\"itemLimitCategoryName\":\"" + EscapeJson(item.itemLimitCategoryName) + "\"" +
+                    ",\"socketBonus\":" + std::to_string(item.socketBonus) +
+                    ",\"socketBonusName\":\"" + EscapeJson(item.socketBonusName) + "\"" +
+                    ",\"socketBonusNameRu\":\"" + EscapeJson(item.socketBonusNameRu) + "\"" +
+                    ",\"socketBonusProc\":";
+                AppendEnchantmentProcJson(body, item.hasSocketBonusProc, item.socketBonusProc);
+                body += ",\"socketBonusEffects\":[";
+                for (std::size_t effectIndex = 0; effectIndex < item.socketBonusEffects.size(); ++effectIndex)
+                {
+                    if (effectIndex != 0)
+                        body += ',';
+                    EquipmentEnchantment::Effect const& effect = item.socketBonusEffects[effectIndex];
+                    body += "{\"type\":" + std::to_string(effect.type) +
+                        ",\"amount\":" + std::to_string(effect.amount) +
+                        ",\"spellId\":" + std::to_string(effect.spellId) + "}";
+                }
+                body += "],\"gemProperties\":" + std::to_string(item.gemProperties) +
+                    ",\"sockets\":[";
+                bool firstSocket = true;
+                for (EquipmentSocket const& socket : item.sockets)
+                {
+                    if (socket.color == 0 && socket.content == 0)
+                        continue;
+                    if (!firstSocket)
+                        body += ',';
+                    firstSocket = false;
+                    body += "{\"color\":" + std::to_string(socket.color) +
+                        ",\"content\":" + std::to_string(socket.content) + "}";
+                }
+                body += "],\"spells\":[";
+                for (std::size_t spellIndex = 0; spellIndex < item.spells.size(); ++spellIndex)
+                {
+                    if (spellIndex != 0)
+                        body += ',';
+                    EquipmentSpell const& spell = item.spells[spellIndex];
+                    body += "{\"id\":" + std::to_string(spell.id) +
+                        ",\"trigger\":" + std::to_string(spell.trigger) +
+                        ",\"charges\":" + std::to_string(spell.charges) +
+                        ",\"ppmRate\":" + std::to_string(spell.ppmRate) +
+                        ",\"cooldownMs\":" + std::to_string(spell.cooldownMs) +
+                        ",\"category\":" + std::to_string(spell.category) +
+                        ",\"categoryCooldownMs\":" + std::to_string(spell.categoryCooldownMs) +
+                        ",\"name\":\"" + EscapeJson(spell.name) + "\"" +
+                        ",\"nameRu\":\"" + EscapeJson(spell.nameRu) + "\"" +
+                        ",\"proc\":";
+                    AppendSpellProcJson(body, spell.hasProc, spell.proc);
+                    body += ",\"effects\":[";
+                    for (std::size_t effectIndex = 0; effectIndex < spell.effects.size(); ++effectIndex)
+                    {
+                        if (effectIndex != 0)
+                            body += ',';
+                        EquipmentSpellEffect const& effect = spell.effects[effectIndex];
+                        body += "{\"index\":" + std::to_string(effect.index) +
+                            ",\"type\":" + std::to_string(effect.type) +
+                            ",\"auraType\":" + std::to_string(effect.auraType) +
+                            ",\"basePoints\":" + std::to_string(effect.basePoints) +
+                            ",\"dieSides\":" + std::to_string(effect.dieSides) +
+                            ",\"realPointsPerLevel\":" + std::to_string(effect.realPointsPerLevel) +
+                            ",\"triggerSpell\":" + std::to_string(effect.triggerSpell) +
+                            ",\"miscValue\":" + std::to_string(effect.miscValue) +
+                            ",\"miscValueB\":" + std::to_string(effect.miscValueB) +
+                            ",\"amplitudeMs\":" + std::to_string(effect.amplitudeMs) + "}";
+                    }
+                    body += "]}";
+                }
+                body += "],\"randomPropertyEnchantments\":[";
+                for (std::size_t propertyIndex = 0; propertyIndex < item.randomPropertyEnchantments.size(); ++propertyIndex)
+                {
+                    if (propertyIndex != 0)
+                        body += ',';
+                    RandomPropertyEnchantment const& property = item.randomPropertyEnchantments[propertyIndex];
+                    body += "{\"id\":" + std::to_string(property.id) +
+                        ",\"allocationPct\":" + std::to_string(property.allocationPct) +
+                        ",\"name\":\"" + EscapeJson(property.name) + "\"" +
+                        ",\"nameRu\":\"" + EscapeJson(property.nameRu) + "\"" +
+                        ",\"proc\":";
+                    AppendEnchantmentProcJson(body, property.hasProc, property.proc);
+                    body += ",\"effects\":[";
+                    for (std::size_t effectIndex = 0; effectIndex < property.effects.size(); ++effectIndex)
+                    {
+                        if (effectIndex != 0)
+                            body += ',';
+                        EquipmentEnchantment::Effect const& effect = property.effects[effectIndex];
+                        body += "{\"type\":" + std::to_string(effect.type) +
+                            ",\"amount\":" + std::to_string(effect.amount) +
+                            ",\"spellId\":" + std::to_string(effect.spellId) + "}";
+                    }
+                    body += "]}";
+                }
+                body += "],\"enchantments\":[";
+                for (std::size_t enchantmentIndex = 0; enchantmentIndex < item.enchantments.size(); ++enchantmentIndex)
+                {
+                    if (enchantmentIndex != 0)
+                        body += ',';
+                    EquipmentEnchantment const& enchantment = item.enchantments[enchantmentIndex];
+                    body += "{\"slot\":" + std::to_string(enchantment.slot) +
+                        ",\"id\":" + std::to_string(enchantment.id) +
+                        ",\"durationMs\":" + std::to_string(enchantment.durationMs) +
+                        ",\"charges\":" + std::to_string(enchantment.charges) +
+                        ",\"name\":\"" + EscapeJson(enchantment.name) + "\"" +
+                        ",\"nameRu\":\"" + EscapeJson(enchantment.nameRu) + "\"" +
+                        ",\"gemId\":" + std::to_string(enchantment.gemId) +
+                        ",\"proc\":";
+                    AppendEnchantmentProcJson(body, enchantment.hasProc, enchantment.proc);
+                    body += ",\"effects\":[";
+                    for (std::size_t effectIndex = 0; effectIndex < enchantment.effects.size(); ++effectIndex)
+                    {
+                        if (effectIndex != 0)
+                            body += ',';
+                        EquipmentEnchantment::Effect const& effect = enchantment.effects[effectIndex];
+                        body += "{\"type\":" + std::to_string(effect.type) +
+                            ",\"amount\":" + std::to_string(effect.amount) +
+                            ",\"spellId\":" + std::to_string(effect.spellId) + "}";
+                    }
+                    body += "]}";
+                }
+                body += "],\"stats\":[";
+                for (std::size_t statIndex = 0; statIndex < item.stats.size(); ++statIndex)
+                {
+                    if (statIndex != 0)
+                        body += ',';
+                    EquipmentStat const& stat = item.stats[statIndex];
+                    body += "{\"type\":" + std::to_string(stat.type) +
+                        ",\"value\":" + std::to_string(stat.value) + "}";
+                }
+                body += "],\"damage\":[";
+                for (std::size_t damageIndex = 0; damageIndex < item.damage.size(); ++damageIndex)
+                {
+                    if (damageIndex != 0)
+                        body += ',';
+                    EquipmentDamage const& damage = item.damage[damageIndex];
+                    body += "{\"min\":" + std::to_string(damage.min) +
+                        ",\"max\":" + std::to_string(damage.max) +
+                        ",\"type\":" + std::to_string(damage.type) + "}";
+                }
+                body += std::string("],\"resistances\":{") +
+                    "\"holy\":" + std::to_string(item.resistances[0]) +
+                    ",\"fire\":" + std::to_string(item.resistances[1]) +
+                    ",\"nature\":" + std::to_string(item.resistances[2]) +
+                    ",\"frost\":" + std::to_string(item.resistances[3]) +
+                    ",\"shadow\":" + std::to_string(item.resistances[4]) +
+                    ",\"arcane\":" + std::to_string(item.resistances[5]) +
+                    "},\"soulbound\":" + (item.soulbound ? "true" : "false") +
+                    ",\"unknownTemplate\":" + (item.unknownTemplate ? "true" : "false") + "}";
             }
-            body += "],\"professions\":[";
+            body += "],\"stats\":";
+            body += stats ? BuildCharacterStatsJson(*stats, online) : "null";
+            body += ",\"professions\":[";
             for (std::size_t index = 0; index < professions.size(); ++index)
             {
                 if (index != 0)
@@ -860,6 +1408,7 @@ namespace ServerApi
         std::shared_ptr<BotTypeSnapshot const> botTypes;
         std::vector<EquippedItem> equipment;
         std::vector<ProfessionSkill> professions;
+        std::optional<CharacterStatSnapshot> stats;
         bool finished = false;
     };
 
@@ -1236,7 +1785,10 @@ namespace ServerApi
             return candidate.guid == guid;
         });
         if (player != players.end())
+        {
             state->runtime = *player;
+            state->stats = player->stats;
+        }
 
         std::string const sql = CharacterSelect(
             "c.guid = " + std::to_string(guid) + " AND c.deleteDate IS NULL", true);
@@ -1450,11 +2002,14 @@ namespace ServerApi
             "ORDER BY i.map, i.difficulty, c.name, c.guid";
 
         auto completionState = std::make_shared<Completion>(std::move(completion));
-        if (!SubmitQuery(sql, [this, completionState](QueryResult result) mutable
+        auto runtimeMapByGuid = std::make_shared<std::unordered_map<uint32_t, uint32_t>>();
+        for (PlayerSnapshot const& player : GetPlayerSnapshots())
+            runtimeMapByGuid->emplace(static_cast<uint32_t>(player.guid), player.mapId);
+        QueryOrProbe(std::move(sql), [this, completionState, runtimeMapByGuid](QueryResult result) mutable
         {
             if (!result)
             {
-                CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable", "DATABASE_UNAVAILABLE"));
+                CompleteRequest(std::move(*completionState), {200, "OK", R"({"data":[]})"});
                 return;
             }
 
@@ -1468,9 +2023,15 @@ namespace ServerApi
                 uint8_t const playerClass = fields[2].Get<uint8_t>();
                 uint8_t const level = fields[3].Get<uint8_t>();
                 bool const online = fields[4].Get<uint8_t>() != 0;
-                uint32_t const currentMap = fields[5].Get<uint32_t>();
+                uint32_t currentMap = fields[5].Get<uint32_t>();
                 uint32_t const currentInstance = fields[6].Get<uint32_t>();
                 uint32_t const mapId = fields[7].Get<uint32_t>();
+                if (online)
+                {
+                    auto const runtimePlayer = runtimeMapByGuid->find(guid);
+                    if (runtimePlayer != runtimeMapByGuid->end())
+                        currentMap = runtimePlayer->second;
+                }
                 uint8_t const difficulty = fields[8].Get<uint8_t>();
                 bool const permanent = fields[9].Get<uint8_t>() != 0;
                 bool const extended = fields[10].Get<uint8_t>() != 0;
@@ -1479,6 +2040,8 @@ namespace ServerApi
 
                 MapEntry const* mapEntry = sMapStore.LookupEntry(mapId);
                 bool const isRaid = mapEntry && mapEntry->IsRaid();
+                bool const inInstance = online && currentMap == mapId &&
+                    (runtimeMapByGuid->find(guid) != runtimeMapByGuid->end() || currentInstance != 0);
                 std::string mapName = mapEntry ? mapEntry->name[LOCALE_enUS] : std::string();
                 if (!first)
                     body += ',';
@@ -1488,12 +2051,14 @@ namespace ServerApi
                     guid, EscapeJson(name), playerClass, level, online ? "true" : "false", mapId,
                     EscapeJson(mapName), isRaid ? "true" : "false", difficulty,
                     permanent ? "true" : "false", extended ? "true" : "false", resetAt,
-                    completedEncounters, online && currentMap == mapId && currentInstance != 0 ? "true" : "false");
+                    completedEncounters, inInstance ? "true" : "false");
             } while (result->NextRow());
             body += "]}";
             CompleteRequest(std::move(*completionState), {200, "OK", std::move(body)});
-        }))
+        }, [this, completionState]() mutable
+        {
             CompleteRequest(std::move(*completionState), MakeError(503, "Service Unavailable", "DATABASE_UNAVAILABLE"));
+        });
         return true;
     }
 
@@ -1569,15 +2134,21 @@ namespace ServerApi
                     status = "skipped";
                     reason = "This worldserver does not own the instance map.";
                 }
-                else if (player && player->IsInCombat())
+                else if (player && bind->save && player->GetMapId() == mapId &&
+                    player->GetInstanceId() == bind->save->GetInstanceId())
                 {
-                    status = "skipped";
-                    reason = "Character is in combat.";
-                }
-                else if (player && player->GetMapId() == mapId && player->GetInstanceId() != 0)
-                {
-                    status = "skipped";
-                    reason = "Character is currently inside this instance.";
+                    // TeleportTo stops combat through the core's normal transfer path.
+                    if (!player->TeleportTo(player->m_homebindMapId, player->m_homebindX, player->m_homebindY,
+                        player->m_homebindZ, player->GetOrientation()))
+                    {
+                        status = "skipped";
+                        reason = "Could not teleport character to their homebind.";
+                    }
+                    else
+                    {
+                        status = "pending";
+                        reason = "Character is being teleported home.";
+                    }
                 }
                 else
                 {
@@ -1617,25 +2188,383 @@ namespace ServerApi
 
     void CharactersApi::QueryEquipment(std::shared_ptr<ProfileState> state)
     {
-        std::string const sql = "SELECT ci.slot, ii.itemEntry FROM character_inventory ci "
+        std::string const sql = "SELECT ci.slot, ii.itemEntry, ii.durability, ii.flags, ii.enchantments, ii.guid, ii.randomPropertyId FROM character_inventory ci "
             "INNER JOIN item_instance ii ON ii.guid = ci.item WHERE ci.guid = " +
             std::to_string(state->guid) + " AND ci.bag = 0 AND ci.slot BETWEEN 0 AND 18 ORDER BY ci.slot ASC";
         QueryOrProbe(std::move(sql), [this, state](QueryResult result)
         {
+            std::vector<uint32_t> entries;
             if (result)
             {
                 do
                 {
                     Field* fields = result->Fetch();
-                    state->equipment.push_back({fields[0].Get<uint8>(), fields[1].Get<uint32>()});
+                    EquippedItem item;
+                    item.slot = fields[0].Get<uint8>();
+                    item.itemEntry = fields[1].Get<uint32>();
+                    item.durability = fields[2].Get<uint32>();
+                    item.soulbound = (fields[3].Get<uint32>() & 1) != 0;
+                    item.instanceGuid = fields[5].Get<uint32>();
+                    item.randomPropertyId = fields[6].Get<int32>();
+                    std::istringstream enchantmentData(fields[4].Get<std::string>());
+                    for (uint8_t slot = 0; slot < MAX_ENCHANTMENT_SLOT; ++slot)
+                    {
+                        uint32_t id = 0;
+                        uint32_t durationMs = 0;
+                        uint32_t charges = 0;
+                        if (!(enchantmentData >> id >> durationMs >> charges))
+                            break;
+                        if (id == 0)
+                            continue;
+
+                        std::string name;
+                        std::string nameRu;
+                        if (SpellItemEnchantmentEntry const* entry = sSpellItemEnchantmentStore.LookupEntry(id))
+                        {
+                            if (entry->description[LOCALE_enUS])
+                                name = entry->description[LOCALE_enUS];
+                            if (entry->description[LOCALE_ruRU])
+                                nameRu = entry->description[LOCALE_ruRU];
+                        }
+                        if (nameRu.empty())
+                            nameRu = name;
+                        EquipmentEnchantment enchantment;
+                        enchantment.slot = slot;
+                        enchantment.id = id;
+                        enchantment.durationMs = durationMs;
+                        enchantment.charges = charges;
+                        enchantment.name = std::move(name);
+                        enchantment.nameRu = std::move(nameRu);
+                        if (SpellItemEnchantmentEntry const* entry = sSpellItemEnchantmentStore.LookupEntry(id))
+                        {
+                            enchantment.gemId = entry->GemID;
+                            for (std::size_t effectIndex = 0; effectIndex < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++effectIndex)
+                            {
+                                uint32_t const type = entry->type[effectIndex];
+                                uint32_t const amount = entry->amount[effectIndex];
+                                uint32_t const spellId = entry->spellid[effectIndex];
+                                if (type != 0 || amount != 0 || spellId != 0)
+                                    enchantment.effects.push_back({type, amount, spellId});
+                            }
+                        }
+                        if (SpellEnchantProcEntry const* proc = sSpellMgr->GetSpellEnchantProcEvent(id))
+                        {
+                            enchantment.hasProc = true;
+                            enchantment.proc = BuildEnchantmentProc(*proc);
+                        }
+                        item.enchantments.push_back(std::move(enchantment));
+                    }
+                    state->equipment.push_back(std::move(item));
+                    entries.push_back(fields[1].Get<uint32>());
                 } while (result->NextRow());
             }
-            QueryProfessions(std::move(state));
+            std::sort(entries.begin(), entries.end());
+            entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+            if (entries.empty())
+            {
+                QueryStats(std::move(state));
+                return;
+            }
+
+            std::string entryList;
+            for (std::size_t index = 0; index < entries.size(); ++index)
+            {
+                if (index != 0)
+                    entryList += ',';
+                entryList += std::to_string(entries[index]);
+            }
+            std::string const itemSql = "SELECT item_template.entry, item_template.displayid, item_template.name, Quality, ItemLevel, RequiredLevel, "
+                "InventoryType, class, subclass, Flags, MaxCount, bonding, armor, block, delay, MaxDurability, "
+                "ItemLimitCategory, stat_type1, stat_value1, stat_type2, stat_value2, stat_type3, stat_value3, "
+                "stat_type4, stat_value4, stat_type5, stat_value5, stat_type6, stat_value6, stat_type7, "
+                "stat_value7, stat_type8, stat_value8, stat_type9, stat_value9, stat_type10, stat_value10, "
+                "dmg_min1, dmg_max1, dmg_type1, dmg_min2, dmg_max2, dmg_type2, holy_res, fire_res, "
+                "nature_res, frost_res, shadow_res, arcane_res, "
+                "COALESCE(NULLIF(item_template_locale.Name, ''), item_template.name) "
+                ",sellprice, allowableclass, allowablerace, requiredskill, requiredskillrank, requiredspell, "
+                "requiredhonorrank, requiredcityrank, requiredreputationfaction, requiredreputationrank, "
+                "RangedModRange, ItemSet, socketColor_1, socketContent_1, socketColor_2, socketContent_2, "
+                "socketColor_3, socketContent_3, socketBonus, GemProperties, "
+                "spellid_1, spelltrigger_1, spellcharges_1, spellppmRate_1, spellcooldown_1, spellcategory_1, spellcategorycooldown_1, "
+                "spellid_2, spelltrigger_2, spellcharges_2, spellppmRate_2, spellcooldown_2, spellcategory_2, spellcategorycooldown_2, "
+                "spellid_3, spelltrigger_3, spellcharges_3, spellppmRate_3, spellcooldown_3, spellcategory_3, spellcategorycooldown_3, "
+                "spellid_4, spelltrigger_4, spellcharges_4, spellppmRate_4, spellcooldown_4, spellcategory_4, spellcategorycooldown_4, "
+                "spellid_5, spelltrigger_5, spellcharges_5, spellppmRate_5, spellcooldown_5, spellcategory_5, spellcategorycooldown_5 "
+                "FROM item_template LEFT JOIN item_template_locale ON item_template_locale.ID = item_template.entry "
+                "AND item_template_locale.locale = 'ruRU' WHERE item_template.entry IN (" + entryList + ")";
+            if (!SubmitWorldQuery(std::move(itemSql), [this, state](QueryResult itemResult)
+            {
+                if (!itemResult)
+                {
+                    if (!SubmitWorldQuery("SELECT 1", [this, state](QueryResult probe)
+                    {
+                        if (probe)
+                        {
+                            QueryStats(std::move(state));
+                            return;
+                        }
+                        state->finished = true;
+                        CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
+                            "WORLD_DATABASE_UNAVAILABLE"));
+                    }))
+                    {
+                        state->finished = true;
+                        CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
+                            "WORLD_DATABASE_UNAVAILABLE"));
+                    }
+                    return;
+                }
+
+                do
+                {
+                    Field* fields = itemResult->Fetch();
+                    uint32_t const entry = fields[0].Get<uint32>();
+                    for (EquippedItem& item : state->equipment)
+                    {
+                        if (item.itemEntry != entry)
+                            continue;
+                        item.displayId = fields[1].Get<uint32>();
+                        item.name = fields[2].Get<std::string>();
+                        item.quality = fields[3].Get<uint8>();
+                        item.itemLevel = fields[4].Get<uint16>();
+                        item.requiredLevel = fields[5].Get<uint8>();
+                        item.inventoryType = fields[6].Get<uint8>();
+                        item.itemClass = fields[7].Get<uint8>();
+                        item.itemSubclass = fields[8].Get<uint8>();
+                        item.flags = fields[9].Get<uint32>();
+                        item.maxCount = fields[10].Get<int32>();
+                        item.bonding = fields[11].Get<uint8>();
+                        item.armor = fields[12].Get<uint32>();
+                        item.block = fields[13].Get<uint32>();
+                        item.delayMs = fields[14].Get<uint32>();
+                        item.maxDurability = fields[15].Get<uint32>();
+                        item.itemLimitCategory = fields[16].Get<int16>();
+                        for (std::size_t statIndex = 0; statIndex < 10; ++statIndex)
+                        {
+                            uint8_t const type = fields[17 + statIndex * 2].Get<uint8>();
+                            int32_t const value = fields[18 + statIndex * 2].Get<int32>();
+                            if (value != 0)
+                                item.stats.push_back({type, value});
+                        }
+                        for (std::size_t damageIndex = 0; damageIndex < 2; ++damageIndex)
+                        {
+                            std::size_t const fieldIndex = 37 + damageIndex * 3;
+                            float const min = fields[fieldIndex].Get<float>();
+                            float const max = fields[fieldIndex + 1].Get<float>();
+                            if (max > 0.0f)
+                                item.damage.push_back({min, max, fields[fieldIndex + 2].Get<uint8>()});
+                        }
+                        for (std::size_t resistanceIndex = 0; resistanceIndex < item.resistances.size();
+                            ++resistanceIndex)
+                            item.resistances[resistanceIndex] = fields[43 + resistanceIndex].Get<int32>();
+                        item.nameRu = fields[49].Get<std::string>();
+                        item.sellPrice = fields[50].Get<uint32>();
+                        item.allowableClass = fields[51].Get<uint32>();
+                        item.allowableRace = fields[52].Get<uint32>();
+                        item.requiredSkill = fields[53].Get<uint32>();
+                        item.requiredSkillRank = fields[54].Get<uint32>();
+                        item.requiredSpell = fields[55].Get<uint32>();
+                        item.requiredHonorRank = fields[56].Get<uint32>();
+                        item.requiredCityRank = fields[57].Get<uint32>();
+                        item.requiredReputationFaction = fields[58].Get<uint32>();
+                        item.requiredReputationRank = fields[59].Get<uint32>();
+                        item.rangedModRange = fields[60].Get<float>();
+                        item.itemSetId = fields[61].Get<uint32>();
+                        for (std::size_t socketIndex = 0; socketIndex < item.sockets.size(); ++socketIndex)
+                        {
+                            std::size_t const fieldIndex = 62 + socketIndex * 2;
+                            item.sockets[socketIndex] = {fields[fieldIndex].Get<uint32>(), fields[fieldIndex + 1].Get<uint32>()};
+                        }
+                        item.socketBonus = fields[68].Get<uint32>();
+                        item.gemProperties = fields[69].Get<uint32>();
+                        for (std::size_t spellIndex = 0; spellIndex < MAX_ITEM_PROTO_SPELLS; ++spellIndex)
+                        {
+                            std::size_t const fieldIndex = 70 + spellIndex * 7;
+                            int32_t const spellId = fields[fieldIndex].Get<int32>();
+                            if (spellId == 0)
+                                continue;
+                            EquipmentSpell spell;
+                            spell.id = spellId;
+                            spell.trigger = fields[fieldIndex + 1].Get<uint8>();
+                            spell.charges = fields[fieldIndex + 2].Get<int16>();
+                            spell.ppmRate = fields[fieldIndex + 3].Get<float>();
+                            spell.cooldownMs = fields[fieldIndex + 4].Get<int32>();
+                            spell.category = fields[fieldIndex + 5].Get<uint16>();
+                            spell.categoryCooldownMs = fields[fieldIndex + 6].Get<int32>();
+                            if (SpellEntry const* spellEntry = sSpellStore.LookupEntry(static_cast<uint32_t>(spellId)))
+                            {
+                                spell.name = spellEntry->SpellName[LOCALE_enUS] ? spellEntry->SpellName[LOCALE_enUS] : "";
+                                spell.nameRu = spellEntry->SpellName[LOCALE_ruRU] ? spellEntry->SpellName[LOCALE_ruRU] : spell.name;
+                            }
+                            if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(static_cast<uint32_t>(spellId)))
+                            {
+                                for (uint8_t effectIndex = 0; effectIndex < MAX_SPELL_EFFECTS; ++effectIndex)
+                                {
+                                    SpellEffectInfo const& source = spellInfo->Effects[effectIndex];
+                                    if (!source.IsEffect())
+                                        continue;
+                                    spell.effects.push_back({source.EffectIndex, source.Effect,
+                                        static_cast<uint32_t>(source.ApplyAuraName), source.BasePoints,
+                                        source.DieSides, source.RealPointsPerLevel, source.TriggerSpell,
+                                        source.MiscValue, source.MiscValueB, source.Amplitude});
+                                }
+                            }
+                            if (SpellProcEntry const* proc = sSpellMgr->GetSpellProcEntry(static_cast<uint32_t>(spellId)))
+                            {
+                                spell.hasProc = true;
+                                spell.proc = BuildSpellProc(*proc);
+                            }
+                            item.spells.push_back(std::move(spell));
+                        }
+                        if (item.itemSetId != 0)
+                        {
+                            if (ItemSetEntry const* set = sItemSetStore.LookupEntry(item.itemSetId))
+                            {
+                                item.itemSetName = set->name[LOCALE_enUS] ? set->name[LOCALE_enUS] : "";
+                                item.itemSetNameRu = set->name[LOCALE_ruRU] ? set->name[LOCALE_ruRU] : item.itemSetName;
+                                for (std::size_t bonusIndex = 0; bonusIndex < MAX_ITEM_SET_SPELLS; ++bonusIndex)
+                                {
+                                    uint32_t const spellId = set->spells[bonusIndex];
+                                    uint32_t const requiredItems = set->items_to_triggerspell[bonusIndex];
+                                    if (spellId == 0 || requiredItems == 0)
+                                        continue;
+                                    EquipmentSetBonus bonus;
+                                    bonus.requiredItems = static_cast<uint8_t>(requiredItems);
+                                    bonus.spellId = spellId;
+                                    if (SpellEntry const* spell = sSpellStore.LookupEntry(spellId))
+                                    {
+                                        bonus.spellName = spell->SpellName[LOCALE_enUS] ? spell->SpellName[LOCALE_enUS] : "";
+                                        bonus.spellNameRu = spell->SpellName[LOCALE_ruRU] ? spell->SpellName[LOCALE_ruRU] : bonus.spellName;
+                                    }
+                                    if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId))
+                                    {
+                                        for (uint8_t effectIndex = 0; effectIndex < MAX_SPELL_EFFECTS; ++effectIndex)
+                                        {
+                                            SpellEffectInfo const& source = spellInfo->Effects[effectIndex];
+                                            if (!source.IsEffect())
+                                                continue;
+                                            bonus.effects.push_back({source.EffectIndex, source.Effect,
+                                                static_cast<uint32_t>(source.ApplyAuraName), source.BasePoints,
+                                                source.DieSides, source.RealPointsPerLevel, source.TriggerSpell,
+                                                source.MiscValue, source.MiscValueB, source.Amplitude});
+                                        }
+                                    }
+                                    if (SpellProcEntry const* proc = sSpellMgr->GetSpellProcEntry(spellId))
+                                    {
+                                        bonus.hasProc = true;
+                                        bonus.proc = BuildSpellProc(*proc);
+                                    }
+                                    item.itemSetBonuses.push_back(std::move(bonus));
+                                }
+                            }
+                        }
+                        if (item.socketBonus != 0)
+                        {
+                            if (SpellItemEnchantmentEntry const* enchantment = sSpellItemEnchantmentStore.LookupEntry(item.socketBonus))
+                            {
+                                item.socketBonusName = enchantment->description[LOCALE_enUS] ? enchantment->description[LOCALE_enUS] : "";
+                                item.socketBonusNameRu = enchantment->description[LOCALE_ruRU] ? enchantment->description[LOCALE_ruRU] : item.socketBonusName;
+                                for (std::size_t effectIndex = 0; effectIndex < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++effectIndex)
+                                {
+                                    uint32_t const type = enchantment->type[effectIndex];
+                                    uint32_t const amount = enchantment->amount[effectIndex];
+                                    uint32_t const spellId = enchantment->spellid[effectIndex];
+                                    if (type != 0 || amount != 0 || spellId != 0)
+                                        item.socketBonusEffects.push_back({type, amount, spellId});
+                                }
+                            }
+                            if (SpellEnchantProcEntry const* proc = sSpellMgr->GetSpellEnchantProcEvent(item.socketBonus))
+                            {
+                                item.hasSocketBonusProc = true;
+                                item.socketBonusProc = BuildEnchantmentProc(*proc);
+                            }
+                        }
+                        if (item.randomPropertyId > 0)
+                        {
+                            if (ItemRandomPropertiesEntry const* property = sItemRandomPropertiesStore.LookupEntry(static_cast<uint32_t>(item.randomPropertyId)))
+                            {
+                                item.randomPropertyName = property->Name[LOCALE_enUS] ? property->Name[LOCALE_enUS] : "";
+                                item.randomPropertyNameRu = property->Name[LOCALE_ruRU] ? property->Name[LOCALE_ruRU] : item.randomPropertyName;
+                                for (uint32_t enchantmentId : property->Enchantment)
+                                    if (enchantmentId != 0)
+                                        item.randomPropertyEnchantments.push_back(BuildRandomPropertyEnchantment(enchantmentId, 0));
+                            }
+                        }
+                        else if (item.randomPropertyId < 0)
+                        {
+                            uint32_t const suffixId = static_cast<uint32_t>(-static_cast<int64_t>(item.randomPropertyId));
+                            if (ItemRandomSuffixEntry const* suffix = sItemRandomSuffixStore.LookupEntry(suffixId))
+                            {
+                                item.randomPropertyName = suffix->Name[LOCALE_enUS] ? suffix->Name[LOCALE_enUS] : "";
+                                item.randomPropertyNameRu = suffix->Name[LOCALE_ruRU] ? suffix->Name[LOCALE_ruRU] : item.randomPropertyName;
+                                for (std::size_t enchantmentIndex = 0; enchantmentIndex < suffix->Enchantment.size(); ++enchantmentIndex)
+                                    if (suffix->Enchantment[enchantmentIndex] != 0)
+                                        item.randomPropertyEnchantments.push_back(BuildRandomPropertyEnchantment(
+                                            suffix->Enchantment[enchantmentIndex], suffix->AllocationPct[enchantmentIndex]));
+                            }
+                        }
+                        item.unknownTemplate = false;
+                    }
+                } while (itemResult->NextRow());
+                QueryStats(std::move(state));
+            }))
+            {
+                state->finished = true;
+                CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
+                    "WORLD_DATABASE_UNAVAILABLE"));
+            }
         }, [this, state]
         {
             state->finished = true;
             CompleteRequest(std::move(state->completion), MakeError(503, "Service Unavailable",
                 "DATABASE_UNAVAILABLE"));
+        });
+    }
+
+    void CharactersApi::QueryStats(std::shared_ptr<ProfileState> state)
+    {
+        if (state->runtime)
+        {
+            QueryProfessions(std::move(state));
+            return;
+        }
+
+        std::string const sql = "SELECT maxhealth, maxpower1, maxpower2, maxpower3, maxpower4, "
+            "maxpower5, maxpower6, maxpower7, strength, agility, stamina, intellect, spirit, armor, "
+            "resHoly, resFire, resNature, resFrost, resShadow, resArcane, blockPct, dodgePct, parryPct, "
+            "critPct, rangedCritPct, spellCritPct, attackPower, rangedAttackPower, spellPower, resilience "
+            "FROM character_stats WHERE guid = " + std::to_string(state->guid);
+        QueryOrProbe(std::move(sql), [this, state](QueryResult result)
+        {
+            if (result)
+            {
+                Field* fields = result->Fetch();
+                CharacterStatSnapshot stats;
+                stats.maxHealth = fields[0].Get<uint32>();
+                for (std::size_t index = 0; index < stats.maxPowers.size(); ++index)
+                    stats.maxPowers[index] = fields[1 + index].Get<uint32>();
+                for (std::size_t index = 0; index < stats.primaryAttributes.size(); ++index)
+                    stats.primaryAttributes[index] = fields[8 + index].Get<uint32>();
+                stats.armor = fields[13].Get<uint32>();
+                for (std::size_t index = 0; index < stats.resistances.size(); ++index)
+                    stats.resistances[index] = fields[14 + index].Get<uint32>();
+                stats.blockPct = fields[20].Get<float>();
+                stats.dodgePct = fields[21].Get<float>();
+                stats.parryPct = fields[22].Get<float>();
+                stats.critPct = fields[23].Get<float>();
+                stats.rangedCritPct = fields[24].Get<float>();
+                stats.spellCritPct = fields[25].Get<float>();
+                stats.attackPower = fields[26].Get<uint32>();
+                stats.rangedAttackPower = fields[27].Get<uint32>();
+                stats.spellPower = fields[28].Get<uint32>();
+                stats.resilience = fields[29].Get<uint32>();
+                state->stats = stats;
+            }
+            QueryProfessions(std::move(state));
+        }, [this, state]
+        {
+            state->stats.reset();
+            QueryProfessions(std::move(state));
         });
     }
 
@@ -1664,7 +2593,8 @@ namespace ServerApi
             uint32_t const zoneId = online ? state->runtime->zoneId : state->character.zoneId;
             state->finished = true;
             CompleteRequest(std::move(state->completion), {200, "OK", BuildProfileJson(state->character,
-                online, bot, botType, mapId, zoneId, state->runtime, state->equipment, state->professions)});
+                online, bot, botType, mapId, zoneId, state->runtime, state->stats,
+                state->equipment, state->professions)});
         }, [this, state]
         {
             state->finished = true;

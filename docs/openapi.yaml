@@ -296,7 +296,7 @@ paths:
     get:
       tags: [Characters]
       summary: List current-realm character instance binds
-      description: Includes online and offline characters. Binds are read from the character database; online and in-instance flags use the live snapshot.
+      description: Includes online and offline characters. Returns an empty data array when no binds exist. Binds are read from the character database; online and in-instance flags use the live snapshot.
       responses:
         '200':
           description: Instance bind snapshot
@@ -315,7 +315,7 @@ paths:
     post:
       tags: [Characters]
       summary: Remove selected character binds for one map and difficulty
-      description: Queues the operation on the world thread. Characters in combat, currently inside the map, or no longer bound are returned as skipped. In cluster mode, a worldserver that does not own the map also skips the operation. Does not alter the global reset schedule.
+      description: Queues the operation on the world thread. For an online character inside the requested instance, starts a homebind teleport even in combat; the core teleport path ends combat. Returns pending until the caller confirms the character left and retries the reset. A failed teleport or a character no longer bound is skipped. In cluster mode, a worldserver that does not own the map also skips the operation. Does not alter the global reset schedule.
       parameters:
         - name: mapId
           in: query
@@ -692,7 +692,7 @@ components:
       required: [guid, status]
       properties:
         guid: {type: integer, format: int64, maximum: 4294967295}
-        status: {type: string, enum: [reset, skipped, failed]}
+        status: {type: string, enum: [reset, pending, skipped, failed]}
         reason: {type: string}
     Error:
       type: object
@@ -817,11 +817,94 @@ components:
             y: {type: number, format: float}
             z: {type: number, format: float}
             orientation: {type: number, format: float}
+    CharacterEnchantmentProc:
+      type: object
+      required: [customChance, ppmChance, procEx, attributeMask]
+      properties:
+        customChance: {type: integer, format: int64}
+        ppmChance: {type: number, format: float}
+        procEx: {type: integer, format: int64}
+        attributeMask: {type: integer, format: int64}
+    CharacterSpellProc:
+      type: object
+      required: [schoolMask, spellFamilyName, spellFamilyMask, procFlags, spellTypeMask, spellPhaseMask, hitMask, attributesMask, disableEffectsMask, procsPerMinute, chance, cooldownMs, charges]
+      properties:
+        schoolMask: {type: integer, format: int64}
+        spellFamilyName: {type: integer, format: int64}
+        spellFamilyMask:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: integer, format: int64}
+        procFlags: {type: integer, format: int64}
+        spellTypeMask: {type: integer, format: int64}
+        spellPhaseMask: {type: integer, format: int64}
+        hitMask: {type: integer, format: int64}
+        attributesMask: {type: integer, format: int64}
+        disableEffectsMask: {type: integer, format: int64}
+        procsPerMinute: {type: number, format: float}
+        chance: {type: number, format: float}
+        cooldownMs: {type: integer, format: int64}
+        charges: {type: integer, format: int64}
+    CharacterStats:
+      type: object
+      required: [source, primaryAttributes, health, powers, armor, resistances, combat]
+      properties:
+        source: {type: string, enum: [live, saved]}
+        primaryAttributes:
+          type: object
+          required: [strength, agility, stamina, intellect, spirit]
+          properties:
+            strength: {type: integer, format: int64}
+            agility: {type: integer, format: int64}
+            stamina: {type: integer, format: int64}
+            intellect: {type: integer, format: int64}
+            spirit: {type: integer, format: int64}
+        health:
+          type: object
+          required: [current, maximum]
+          properties:
+            current: {type: integer, format: int64, nullable: true}
+            maximum: {type: integer, format: int64}
+        powers:
+          type: array
+          items:
+            type: object
+            required: [type, current, maximum]
+            properties:
+              type: {type: string, enum: [mana, rage, focus, energy, happiness, rune, runicPower]}
+              current: {type: integer, format: int64, nullable: true}
+              maximum: {type: integer, format: int64}
+        armor: {type: integer, format: int64}
+        resistances:
+          type: object
+          required: [holy, fire, nature, frost, shadow, arcane]
+          properties:
+            holy: {type: integer, format: int64}
+            fire: {type: integer, format: int64}
+            nature: {type: integer, format: int64}
+            frost: {type: integer, format: int64}
+            shadow: {type: integer, format: int64}
+            arcane: {type: integer, format: int64}
+        combat:
+          type: object
+          required: [attackPower, rangedAttackPower, spellPower, resilience, blockPct, dodgePct, parryPct, critPct, rangedCritPct, spellCritPct]
+          properties:
+            attackPower: {type: integer, format: int64}
+            rangedAttackPower: {type: integer, format: int64}
+            spellPower: {type: integer, format: int64}
+            resilience: {type: integer, format: int64}
+            blockPct: {type: number, format: float}
+            dodgePct: {type: number, format: float}
+            parryPct: {type: number, format: float}
+            critPct: {type: number, format: float}
+            rangedCritPct: {type: number, format: float}
+            spellCritPct: {type: number, format: float}
     CharacterProfile:
       allOf:
         - {$ref: '#/components/schemas/Character'}
         - type: object
-          required: [xp, money, talents, equipment, professions]
+          required: [xp, money, talents, equipmentMetadataVersion, equipment, stats, professions]
           properties:
             xp: {type: integer, format: int64, maximum: 4294967295}
             money: {type: integer, format: int64, maximum: 4294967295}
@@ -831,14 +914,226 @@ components:
               properties:
                 activeGroup: {type: integer, format: int32}
                 totalGroups: {type: integer, format: int32}
+            equipmentMetadataVersion: {type: integer, format: int32, enum: [2], description: Equipment template and effect fields included in the response}
+            stats:
+              nullable: true
+              allOf:
+                - {$ref: '#/components/schemas/CharacterStats'}
             equipment:
               type: array
               items:
                 type: object
-                required: [slot, itemEntry]
+                required: [slot, itemEntry, instanceGuid, randomPropertyId, randomPropertyEnchantments, sockets, spells, enchantments, itemSetBonuses]
                 properties:
                   slot: {type: integer, format: int32}
                   itemEntry: {type: integer, format: int32}
+                  instanceGuid: {type: integer, format: int64, minimum: 1, maximum: 4294967295, description: Unsigned 32-bit item instance GUID from item_instance}
+                  randomPropertyId: {type: integer, format: int32, description: Signed item random property or suffix ID from item_instance}
+                  randomPropertyName: {type: string}
+                  randomPropertyNameRu: {type: string}
+                  randomPropertyEnchantments:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, allocationPct, name, nameRu, proc, effects]
+                      properties:
+                        id: {type: integer, format: int64}
+                        allocationPct: {type: integer, format: int64}
+                        name: {type: string, description: English random-property enchantment name}
+                        nameRu: {type: string, description: Russian random-property enchantment name; falls back to name when no translation exists}
+                        proc:
+                          nullable: true
+                          allOf:
+                            - {$ref: '#/components/schemas/CharacterEnchantmentProc'}
+                        effects:
+                          type: array
+                          items:
+                            type: object
+                            required: [type, amount, spellId]
+                            properties:
+                              type: {type: integer, format: int64}
+                              amount: {type: integer, format: int64}
+                              spellId: {type: integer, format: int64}
+                  displayId: {type: integer, format: int32}
+                  name: {type: string, description: English item name}
+                  nameRu: {type: string, description: Russian item name; falls back to name when no translation exists}
+                  quality: {type: integer, format: int32}
+                  itemLevel: {type: integer, format: int32}
+                  requiredLevel: {type: integer, format: int32}
+                  inventoryType: {type: integer, format: int32}
+                  itemClass: {type: integer, format: int32}
+                  itemSubclass: {type: integer, format: int32}
+                  flags: {type: integer, format: int64}
+                  maxCount: {type: integer, format: int32}
+                  bonding: {type: integer, format: int32}
+                  armor: {type: integer, format: int32}
+                  block: {type: integer, format: int32}
+                  delayMs: {type: integer, format: int32}
+                  durability: {type: integer, format: int32}
+                  maxDurability: {type: integer, format: int32}
+                  rangedModRange: {type: number, format: float}
+                  sellPrice: {type: integer, format: int64}
+                  allowableClass: {type: integer, format: int64}
+                  allowableRace: {type: integer, format: int64}
+                  requiredSkill: {type: integer, format: int64}
+                  requiredSkillRank: {type: integer, format: int64}
+                  requiredSpell: {type: integer, format: int64}
+                  requiredHonorRank: {type: integer, format: int64}
+                  requiredCityRank: {type: integer, format: int64}
+                  requiredReputationFaction: {type: integer, format: int64}
+                  requiredReputationRank: {type: integer, format: int64}
+                  itemSetId: {type: integer, format: int64}
+                  itemSetName: {type: string}
+                  itemSetNameRu: {type: string}
+                  itemSetEquippedCount: {type: integer, format: int32}
+                  itemSetBonuses:
+                    type: array
+                    items:
+                      type: object
+                      required: [requiredItems, spellId, spellName, spellNameRu, proc, active, effects]
+                      properties:
+                        requiredItems: {type: integer, format: int32}
+                        spellId: {type: integer, format: int64}
+                        spellName: {type: string}
+                        spellNameRu: {type: string}
+                        proc:
+                          nullable: true
+                          allOf:
+                            - {$ref: '#/components/schemas/CharacterSpellProc'}
+                        active: {type: boolean}
+                        effects:
+                          type: array
+                          items:
+                            type: object
+                            required: [index, type, auraType, basePoints, dieSides, realPointsPerLevel, triggerSpell, miscValue, miscValueB, amplitudeMs]
+                            properties:
+                              index: {type: integer, format: int32}
+                              type: {type: integer, format: int64}
+                              auraType: {type: integer, format: int64}
+                              basePoints: {type: integer, format: int32}
+                              dieSides: {type: integer, format: int32}
+                              realPointsPerLevel: {type: number, format: float}
+                              triggerSpell: {type: integer, format: int64}
+                              miscValue: {type: integer, format: int32}
+                              miscValueB: {type: integer, format: int32}
+                              amplitudeMs: {type: integer, format: int64}
+                  itemLimitCategory: {type: integer, format: int32}
+                  itemLimitCategoryName: {type: string}
+                  socketBonus: {type: integer, format: int64}
+                  socketBonusName: {type: string}
+                  socketBonusNameRu: {type: string}
+                  socketBonusProc:
+                    nullable: true
+                    allOf:
+                      - {$ref: '#/components/schemas/CharacterEnchantmentProc'}
+                  socketBonusEffects:
+                    type: array
+                    items:
+                      type: object
+                      required: [type, amount, spellId]
+                      properties:
+                        type: {type: integer, format: int64}
+                        amount: {type: integer, format: int64}
+                        spellId: {type: integer, format: int64}
+                  gemProperties: {type: integer, format: int64}
+                  sockets:
+                    type: array
+                    items:
+                      type: object
+                      required: [color, content]
+                      properties:
+                        color: {type: integer, format: int32}
+                        content: {type: integer, format: int64}
+                  spells:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, trigger, charges, ppmRate, cooldownMs, category, categoryCooldownMs, name, nameRu, proc, effects]
+                      properties:
+                        id: {type: integer, format: int32}
+                        trigger: {type: integer, format: int32}
+                        charges: {type: integer, format: int32}
+                        ppmRate: {type: number, format: float}
+                        cooldownMs: {type: integer, format: int32}
+                        category: {type: integer, format: int32}
+                        categoryCooldownMs: {type: integer, format: int32}
+                        name: {type: string}
+                        nameRu: {type: string}
+                        proc:
+                          nullable: true
+                          allOf:
+                            - {$ref: '#/components/schemas/CharacterSpellProc'}
+                        effects:
+                          type: array
+                          items:
+                            type: object
+                            required: [index, type, auraType, basePoints, dieSides, realPointsPerLevel, triggerSpell, miscValue, miscValueB, amplitudeMs]
+                            properties:
+                              index: {type: integer, format: int32}
+                              type: {type: integer, format: int64}
+                              auraType: {type: integer, format: int64}
+                              basePoints: {type: integer, format: int32}
+                              dieSides: {type: integer, format: int32}
+                              realPointsPerLevel: {type: number, format: float}
+                              triggerSpell: {type: integer, format: int64}
+                              miscValue: {type: integer, format: int32}
+                              miscValueB: {type: integer, format: int32}
+                              amplitudeMs: {type: integer, format: int64}
+                  enchantments:
+                    type: array
+                    items:
+                      type: object
+                      required: [slot, id, durationMs, charges, name, nameRu, gemId, proc, effects]
+                      properties:
+                        slot: {type: integer, format: int32, minimum: 0, maximum: 11}
+                        id: {type: integer, format: int64}
+                        durationMs: {type: integer, format: int64}
+                        charges: {type: integer, format: int64}
+                        name: {type: string, description: English enchantment name}
+                        nameRu: {type: string, description: Russian enchantment name; falls back to name when no translation exists}
+                        gemId: {type: integer, format: int64}
+                        proc:
+                          nullable: true
+                          allOf:
+                            - {$ref: '#/components/schemas/CharacterEnchantmentProc'}
+                        effects:
+                          type: array
+                          items:
+                            type: object
+                            required: [type, amount, spellId]
+                            properties:
+                              type: {type: integer, format: int64}
+                              amount: {type: integer, format: int64}
+                              spellId: {type: integer, format: int64}
+                  stats:
+                    type: array
+                    items:
+                      type: object
+                      required: [type, value]
+                      properties:
+                        type: {type: integer, format: int32}
+                        value: {type: integer, format: int32}
+                  damage:
+                    type: array
+                    items:
+                      type: object
+                      required: [min, max, type]
+                      properties:
+                        min: {type: number, format: float}
+                        max: {type: number, format: float}
+                        type: {type: integer, format: int32}
+                  soulbound: {type: boolean}
+                  resistances:
+                    type: object
+                    required: [holy, fire, nature, frost, shadow, arcane]
+                    properties:
+                      holy: {type: integer, format: int32}
+                      fire: {type: integer, format: int32}
+                      nature: {type: integer, format: int32}
+                      frost: {type: integer, format: int32}
+                      shadow: {type: integer, format: int32}
+                      arcane: {type: integer, format: int32}
+                  unknownTemplate: {type: boolean}
             professions:
               type: array
               items:

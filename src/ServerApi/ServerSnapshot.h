@@ -5,6 +5,7 @@
 #ifndef SERVER_API_SNAPSHOT_H_
 #define SERVER_API_SNAPSHOT_H_
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -22,6 +23,27 @@ namespace ServerApi
         uint32_t activeInstances = 0;
     };
 
+    struct CharacterStatSnapshot
+    {
+        std::array<uint32_t, 5> primaryAttributes{};
+        uint32_t health = 0;
+        uint32_t maxHealth = 0;
+        std::array<uint32_t, 7> powers{};
+        std::array<uint32_t, 7> maxPowers{};
+        uint32_t armor = 0;
+        std::array<uint32_t, 6> resistances{};
+        float blockPct = 0.0f;
+        float dodgePct = 0.0f;
+        float parryPct = 0.0f;
+        float critPct = 0.0f;
+        float rangedCritPct = 0.0f;
+        float spellCritPct = 0.0f;
+        uint32_t attackPower = 0;
+        uint32_t rangedAttackPower = 0;
+        uint32_t spellPower = 0;
+        uint32_t resilience = 0;
+    };
+
     struct PlayerSnapshot
     {
         uint64_t guid = 0;
@@ -36,6 +58,7 @@ namespace ServerApi
         uint32_t maxHealth = 0;
         uint32_t power = 0;
         uint32_t maxPower = 0;
+        CharacterStatSnapshot stats;
         bool bot = false;
         bool inCombat = false;
         uint64_t victimGuid = 0;
