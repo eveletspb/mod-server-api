@@ -22,9 +22,11 @@ limited to HTTP/WebSocket access to worldserver runtime state, authentication,
 limits, snapshots, the world-thread command queue, the EventBus, common
 contracts, and routing for registered module capabilities.
 
-It must not own domain state or domain rules for accounts, dungeon runs, raids,
-rosters, gear, talents, premades, history, or battle logs. Those capabilities
-belong to their feature modules. A feature module may expose a small
+It must not own domain state or domain rules for dungeon runs, raids, rosters,
+gear, talents, premades, history, or battle logs. Those capabilities belong to
+their feature modules. Basic account creation and access assignment are a
+narrow core integration; extended account domain features belong to their
+feature modules. A feature module may expose a small
 value-type integration bridge containing read snapshots, world-thread commands
 and serializable events. The API module should not depend on the feature
 module's internal managers or game-object pointers.
@@ -43,8 +45,12 @@ processor. This is a narrow core-data exception and does not change the schema
 or expose account credentials, bags, bank or mail.
 
 New domain-specific behavior should not be added directly to `ApiServer.cpp`.
-The account API is temporarily removed. Dungeon routes remain a compatibility
-adapter and should be moved behind this boundary incrementally.
+Account creation and security updates are implemented in `AccountsApi`. Auth DB
+reads use asynchronous queries and writes use asynchronous transactions; their
+callbacks are processed on the API strand. After a security transaction
+commits, only the in-memory RBAC refresh for an online session is queued to the
+world thread. Dungeon routes remain a compatibility adapter and should be
+moved behind this boundary incrementally.
 
 Feature modules register a single handler through `ModuleRegistry`. The handler
 owns only `/api/v1/mod/<module-name>/...`; registration rejects invalid names,
@@ -83,7 +89,7 @@ EventBus worker
 
 API IO worker
     ├── accept HTTP connections and write responses
-    ├── poll the API-owned CharacterDatabase callback processor
+    ├── poll API-owned CharacterDatabase and LoginDatabase callbacks
     └── read immutable runtime snapshots; never access core game objects
 
 Playerbots account-type cache worker (only when mod-playerbots is compiled)
@@ -103,14 +109,17 @@ slow client cannot create an unbounded executor backlog. Each WebSocket has a
 bounded write queue. It does not pass `Player*`, `Map*`,
 `Group*`, databases, or client sockets across the thread boundary.
 
-`CharactersApi` returns Character DB rows to the API IO worker through an
-API-owned `QueryCallbackProcessor`, not the world query processor. Requests
+`CharactersApi` and `AccountsApi` process their database callbacks on API-owned
+strands, not the world query processor. Character requests
 are bounded to 32 concurrent operations; list scans use bounded database pages
 and continue through an exclusive GUID cursor. Only copied DTO values cross
 from DB callbacks into response builders. For online records, status and
 location are overlaid from the immutable world-thread snapshot. The optional
 Playerbots account-type cache is copied from its dedicated read-only worker;
 the synchronous Playerbots DB pool is never called from world or HTTP threads.
+Account queries and transactions are asynchronous. The world-thread queue is
+used only to refresh the RBAC state of an online session after an account
+security transaction completes.
 
 ## Dependency decision
 
@@ -127,6 +136,6 @@ builders because no project-wide JSON DTO dependency is selected.
   shared escaping and request helpers cover the current manual builders.
 - Runtime game-state reads use a world-thread snapshot; no raw core pointers cross into API workers. Character DB data is read asynchronously by the API-owned callback processor.
 - State-changing requests must use a world-thread command queue.
-- Account routes are not exposed until their operations have a non-blocking execution model.
+- Account reads and writes use asynchronous Login DB queries and transactions; online RBAC refreshes use the world-thread command queue.
 - EventBus queue overflow must be observable and policy-driven before telemetry is connected.
 - WebSocket sessions have bounded per-client queues; overflow closes the session.

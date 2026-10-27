@@ -95,12 +95,14 @@ curl \
 | `POST` | `/api/v1/accounts` | configured provider |
 | `POST` | `/api/v1/accounts/{accountId}/security` | configured provider |
 
-Account mutations are queued through the worldserver and use the core account
-manager. Create requests send the password only in the JSON body. Security
-levels are `0` Player, `1` Moderator, `2` Game Master and `3` Administrator;
-`realmId=-1` applies to all realms. The mutation result distinguishes completed,
-partial and rejected operations, and remains pending if the Auth database has
-not confirmed the write within the server's wait window.
+Account reads and writes use asynchronous Login DB queries and transactions.
+Create requests send the password only in the JSON body; the server stores the
+core SRP6 registration data. Security levels are `0` Player, `1` Moderator,
+`2` Game Master and `3` Administrator; `realmId=-1` applies to all realms.
+After a security update is committed, the API refreshes an online session's
+RBAC state through the world-thread command queue. A `202` result indicates
+that this session refresh is pending or that account creation was committed
+but its account ID could not yet be confirmed.
 
 ### Players
 

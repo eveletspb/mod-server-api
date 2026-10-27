@@ -81,7 +81,7 @@ paths:
     post:
       tags: [Accounts]
       summary: Create an account and optionally assign its security level
-      description: Queues account creation and access assignment through the worldserver. Password is accepted only in the JSON body. securityLevel supports 0 Player, 1 Moderator, 2 Game Master and 3 Administrator. realmId is -1 for all realms or a positive configured realm ID.
+      description: Uses asynchronous Login DB queries and transactions. Password is accepted only in the JSON body and is converted to the core SRP6 registration data. securityLevel supports 0 Player, 1 Moderator, 2 Game Master and 3 Administrator. realmId is -1 for all realms or a positive configured realm ID. After a security update commits, online session RBAC refresh runs through the world-thread command queue.
       requestBody:
         required: true
         content:
@@ -94,7 +94,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AccountOperationResult'}
         '202':
-          description: Account operation is still pending confirmation
+          description: Account creation committed, but the account ID, requested access update, or online session refresh is still pending
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AccountOperationResult'}
@@ -124,7 +124,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/AccountOperationResult'}
         '202':
-          description: Access update is still pending confirmation
+          description: Access is committed, but refresh of an online session's RBAC state is still pending
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AccountOperationResult'}
@@ -621,7 +621,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
     QueueFull:
-      description: World-thread command queue is full
+      description: A bounded API request or world-thread command queue has no available capacity
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}

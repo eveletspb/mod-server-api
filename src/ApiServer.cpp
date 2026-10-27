@@ -1185,15 +1185,17 @@ namespace ServerApi
             std::shared_ptr<std::atomic_uint32_t> webSocketClients,
             std::shared_ptr<std::atomic_uint32_t> sseClients,
             std::shared_ptr<RequestRateLimiter> requestRateLimiter,
+            std::shared_ptr<AccountsApi> accountsApi,
             std::shared_ptr<CharactersApi> charactersApi,
-            boost::asio::strand<boost::asio::io_context::executor_type> charactersApiStrand,
+            boost::asio::strand<boost::asio::io_context::executor_type> apiStrand,
             std::shared_ptr<WebSocketPublishPool> publishPool,
             std::shared_ptr<AuthenticationProvider> authenticationProvider,
             bool authenticationRequired)
             : _socket(std::move(socket)), _config(std::move(config)),
               _webSocketClients(std::move(webSocketClients)), _sseClients(std::move(sseClients)),
               _requestRateLimiter(std::move(requestRateLimiter)),
-              _charactersApi(std::move(charactersApi)), _charactersApiStrand(std::move(charactersApiStrand)),
+              _accountsApi(std::move(accountsApi)),
+              _charactersApi(std::move(charactersApi)), _apiStrand(std::move(apiStrand)),
               _publishPool(std::move(publishPool)),
               _authenticationProvider(std::move(authenticationProvider)),
               _authenticationRequired(authenticationRequired) { }
@@ -1442,8 +1444,22 @@ namespace ServerApi
                         self->WriteResponse(response.status, response.reason, response.body);
                     });
                 };
-                if (!AccountsApi::Create(RequestBody(), std::move(completion)))
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
+                auto queueFull = [self]
+                {
+                    boost::asio::post(self->_socket.get_executor(), [self]
+                    {
+                        self->WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"ACCOUNT_QUEUE_FULL"}})");
+                    });
+                };
+                std::shared_ptr<AccountsApi> accountsApi = _accountsApi.lock();
+                std::string body = RequestBody();
+                boost::asio::post(_apiStrand, [accountsApi, body = std::move(body),
+                    completion = std::move(completion), queueFull = std::move(queueFull)]() mutable
+                {
+                    if (!accountsApi || !accountsApi->Create(std::move(body), std::move(completion)))
+                        queueFull();
+                });
                 return;
             }
             else if (method == "POST" && path.rfind("/api/v1/accounts/", 0) == 0 && path.ends_with("/security"))
@@ -1472,8 +1488,22 @@ namespace ServerApi
                         self->WriteResponse(response.status, response.reason, response.body);
                     });
                 };
-                if (!AccountsApi::SetSecurity(accountId, RequestBody(), std::move(completion)))
-                    WriteResponse(503, "Service Unavailable", R"({"error":{"code":"COMMAND_QUEUE_FULL"}})");
+                auto queueFull = [self]
+                {
+                    boost::asio::post(self->_socket.get_executor(), [self]
+                    {
+                        self->WriteResponse(503, "Service Unavailable",
+                            R"({"error":{"code":"ACCOUNT_QUEUE_FULL"}})");
+                    });
+                };
+                std::shared_ptr<AccountsApi> accountsApi = _accountsApi.lock();
+                std::string body = RequestBody();
+                boost::asio::post(_apiStrand, [accountsApi, accountId, body = std::move(body),
+                    completion = std::move(completion), queueFull = std::move(queueFull)]() mutable
+                {
+                    if (!accountsApi || !accountsApi->SetSecurity(accountId, std::move(body), std::move(completion)))
+                        queueFull();
+                });
                 return;
             }
             else if (path == "/api/v1/instance-binds" || path == "/api/v1/instance-binds/reset")
@@ -1501,7 +1531,7 @@ namespace ServerApi
                     });
                 };
                 std::string requestTarget = target;
-                boost::asio::post(_charactersApiStrand, [charactersApi, reset,
+                boost::asio::post(_apiStrand, [charactersApi, reset,
                     requestTarget = std::move(requestTarget), completion = std::move(completion),
                     queueFull = std::move(queueFull)]() mutable
                 {
@@ -1559,7 +1589,7 @@ namespace ServerApi
                 };
                 std::string requestPath = path;
                 std::string requestTarget = target;
-                boost::asio::post(_charactersApiStrand,
+                boost::asio::post(_apiStrand,
                     [charactersApi,
                         requestPath = std::move(requestPath),
                         requestTarget = std::move(requestTarget), guid,
@@ -1812,8 +1842,9 @@ namespace ServerApi
         std::shared_ptr<std::atomic_uint32_t> _webSocketClients;
         std::shared_ptr<std::atomic_uint32_t> _sseClients;
         std::shared_ptr<RequestRateLimiter> _requestRateLimiter;
+        std::weak_ptr<AccountsApi> _accountsApi;
         std::shared_ptr<CharactersApi> _charactersApi;
-        boost::asio::strand<boost::asio::io_context::executor_type> _charactersApiStrand;
+        boost::asio::strand<boost::asio::io_context::executor_type> _apiStrand;
         std::shared_ptr<WebSocketPublishPool> _publishPool;
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
@@ -1903,7 +1934,9 @@ namespace ServerApi
             return false;
         }
 
-        _charactersApi = std::make_shared<CharactersApi>(_charactersApiStrand);
+        _accountsApi = std::make_shared<AccountsApi>(_apiStrand);
+        _accountsApi->Start();
+        _charactersApi = std::make_shared<CharactersApi>(_apiStrand);
         _charactersApi->Start();
         _webSocketPublishPool = std::make_shared<WebSocketPublishPool>(_config.maxWebSocketPublishQueue);
         _webSocketPublishPool->Start();
@@ -1921,13 +1954,16 @@ namespace ServerApi
         if (!_running.exchange(false))
             return;
 
-        if (_charactersApi && !_threads.empty())
+        if ((_charactersApi || _accountsApi) && !_threads.empty())
         {
             auto stopped = std::make_shared<std::promise<void>>();
             std::future<void> completed = stopped->get_future();
-            boost::asio::post(_charactersApiStrand, [charactersApi = _charactersApi, stopped]
+            boost::asio::post(_apiStrand, [accountsApi = _accountsApi, charactersApi = _charactersApi, stopped]
             {
-                charactersApi->Stop();
+                if (accountsApi)
+                    accountsApi->Stop();
+                if (charactersApi)
+                    charactersApi->Stop();
                 stopped->set_value();
             });
             completed.wait();
@@ -1944,6 +1980,7 @@ namespace ServerApi
 
         boost::system::error_code error;
         _acceptor.close(error);
+        _accountsApi.reset();
         _charactersApi.reset();
         _webSocketPublishPool.reset();
         _authenticationProvider.reset();
@@ -1959,7 +1996,7 @@ namespace ServerApi
         {
             if (!error)
                 std::make_shared<HttpSession>(std::move(socket), _config, _webSocketClients,
-                    _sseClients, _requestRateLimiter, _charactersApi, _charactersApiStrand,
+                    _sseClients, _requestRateLimiter, _accountsApi, _charactersApi, _apiStrand,
                     _webSocketPublishPool, _authenticationProvider, _authenticationRequired)->Start();
 
             if (_running)

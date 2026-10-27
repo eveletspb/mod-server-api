@@ -20,6 +20,7 @@
 
 namespace ServerApi
 {
+    class AccountsApi;
     class CharactersApi;
     class WebSocketPublishPool;
 
@@ -44,11 +45,12 @@ namespace ServerApi
 
         boost::asio::io_context _ioContext;
         boost::asio::ip::tcp::acceptor _acceptor{_ioContext};
-        boost::asio::strand<boost::asio::io_context::executor_type> _charactersApiStrand =
+        boost::asio::strand<boost::asio::io_context::executor_type> _apiStrand =
             boost::asio::make_strand(_ioContext);
         Config _config;
         std::shared_ptr<AuthenticationProvider> _authenticationProvider;
         bool _authenticationRequired = false;
+        std::shared_ptr<AccountsApi> _accountsApi;
         std::shared_ptr<CharactersApi> _charactersApi;
         std::shared_ptr<WebSocketPublishPool> _webSocketPublishPool;
         std::vector<std::thread> _threads;

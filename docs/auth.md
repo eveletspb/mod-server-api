@@ -74,4 +74,4 @@ identity headers over plain HTTP on an untrusted network.
 | `429` | Global HTTP request rate limit exceeded |
 | `500` | Authentication provider failed or returned an invalid result |
 | `501` | An optional module integration is unavailable |
-| `503` | Command/WebSocket/character request capacity reached or a required database is unavailable |
+| `503` | API, command, WebSocket, or character request capacity reached, or a required database is unavailable |
